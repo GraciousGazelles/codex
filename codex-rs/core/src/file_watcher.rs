@@ -11,15 +11,18 @@ use std::sync::RwLock;
 use std::time::Duration;
 
 use notify::Event;
+use notify::EventKind;
 use notify::RecommendedWatcher;
 use notify::RecursiveMode;
 use notify::Watcher;
+use notify::event::MetadataKind;
+use notify::event::ModifyKind;
 use tokio::runtime::Handle;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio::time::sleep_until;
-use tracing::info;
+use tracing::debug;
 use tracing::warn;
 
 use crate::config::Config;
@@ -163,13 +166,15 @@ impl FileWatcher {
                         res = raw_rx.recv() => {
                             match res {
                                 Some(Ok(event)) => {
-                                    info!(
-                                        event_kind = ?event.kind,
-                                        event_paths = ?event.paths,
-                                        event_attrs = ?event.attrs,
-                                        "file watcher received filesystem event"
-                                    );
                                     let skills_paths = classify_event(&event, &state);
+                                    if !skills_paths.is_empty() {
+                                        debug!(
+                                            event_kind = ?event.kind,
+                                            event_paths = ?event.paths,
+                                            event_attrs = ?event.attrs,
+                                            "file watcher received relevant filesystem event"
+                                        );
+                                    }
                                     let now = Instant::now();
                                     skills.add(skills_paths);
 
@@ -245,6 +250,10 @@ impl FileWatcher {
 }
 
 fn classify_event(event: &Event, state: &RwLock<WatchState>) -> Vec<PathBuf> {
+    if !is_semantic_skills_event(event.kind) {
+        return Vec::new();
+    }
+
     let mut skills_paths = Vec::new();
     let skills_roots = match state.read() {
         Ok(state) => state.skills_roots.clone(),
@@ -263,6 +272,13 @@ fn classify_event(event: &Event, state: &RwLock<WatchState>) -> Vec<PathBuf> {
     skills_paths
 }
 
+fn is_semantic_skills_event(kind: EventKind) -> bool {
+    !matches!(
+        kind,
+        EventKind::Access(_) | EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime))
+    )
+}
+
 fn is_skills_path(path: &Path, roots: &HashSet<PathBuf>) -> bool {
     roots.iter().any(|root| path.starts_with(root))
 }
@@ -271,6 +287,9 @@ fn is_skills_path(path: &Path, roots: &HashSet<PathBuf>) -> bool {
 mod tests {
     use super::*;
     use notify::EventKind;
+    use notify::event::AccessKind;
+    use notify::event::MetadataKind;
+    use notify::event::ModifyKind;
     use pretty_assertions::assert_eq;
     use tokio::time::timeout;
 
@@ -334,6 +353,32 @@ mod tests {
 
         let classified = classify_event(&event, &state);
         assert_eq!(classified, vec![root.join("demo/SKILL.md")]);
+    }
+
+    #[test]
+    fn classify_event_ignores_access_only_events() {
+        let root = path("/tmp/skills");
+        let state = RwLock::new(WatchState {
+            skills_roots: HashSet::from([root.clone()]),
+        });
+        let mut event = notify_event(vec![root.join("demo/SKILL.md")]);
+        event.kind = EventKind::Access(AccessKind::Any);
+
+        let classified = classify_event(&event, &state);
+        assert_eq!(classified, Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn classify_event_ignores_access_time_metadata_events() {
+        let root = path("/tmp/skills");
+        let state = RwLock::new(WatchState {
+            skills_roots: HashSet::from([root.clone()]),
+        });
+        let mut event = notify_event(vec![root.join("demo/SKILL.md")]);
+        event.kind = EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime));
+
+        let classified = classify_event(&event, &state);
+        assert_eq!(classified, Vec::<PathBuf>::new());
     }
 
     #[test]

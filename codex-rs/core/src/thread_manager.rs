@@ -69,10 +69,15 @@ fn build_file_watcher(codex_home: PathBuf, skills_manager: Arc<SkillsManager>) -
             loop {
                 match rx.recv().await {
                     Ok(FileWatcherEvent::SkillsChanged { .. }) => {
-                        skills_manager.clear_cache();
+                        skills_manager.mark_dirty();
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!(
+                            "file watcher listener lagged by {skipped} events; marking skills cache dirty"
+                        );
+                        skills_manager.mark_dirty();
+                    }
                 }
             }
         });

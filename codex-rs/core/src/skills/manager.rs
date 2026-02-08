@@ -3,9 +3,12 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::RwLock;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use codex_utils_absolute_path::AbsolutePathBuf;
 use toml::Value as TomlValue;
+use tracing::debug;
 use tracing::info;
 use tracing::warn;
 
@@ -19,9 +22,16 @@ use crate::skills::loader::load_skills_from_roots;
 use crate::skills::loader::skill_roots_from_layer_stack_with_agents;
 use crate::skills::system::install_system_skills;
 
+#[derive(Clone)]
+struct CachedSkillLoadOutcome {
+    outcome: SkillLoadOutcome,
+    revision: u64,
+}
+
 pub struct SkillsManager {
     codex_home: PathBuf,
-    cache_by_cwd: RwLock<HashMap<PathBuf, SkillLoadOutcome>>,
+    cache_by_cwd: RwLock<HashMap<PathBuf, CachedSkillLoadOutcome>>,
+    cache_revision: AtomicU64,
 }
 
 impl SkillsManager {
@@ -33,6 +43,7 @@ impl SkillsManager {
         Self {
             codex_home,
             cache_by_cwd: RwLock::new(HashMap::new()),
+            cache_revision: AtomicU64::new(0),
         }
     }
 
@@ -40,12 +51,15 @@ impl SkillsManager {
     /// loading. This also seeds the per-cwd cache for subsequent lookups.
     pub fn skills_for_config(&self, config: &Config) -> SkillLoadOutcome {
         let cwd = &config.cwd;
+        let revision = self.cache_revision.load(Ordering::SeqCst);
         let cached = match self.cache_by_cwd.read() {
             Ok(cache) => cache.get(cwd).cloned(),
             Err(err) => err.into_inner().get(cwd).cloned(),
         };
-        if let Some(outcome) = cached {
-            return outcome;
+        if let Some(cached) = cached
+            && cached.revision == revision
+        {
+            return cached.outcome;
         }
 
         let roots =
@@ -56,17 +70,29 @@ impl SkillsManager {
             Ok(cache) => cache,
             Err(err) => err.into_inner(),
         };
-        cache.insert(cwd.to_path_buf(), outcome.clone());
+        // Persist the pre-load revision. If `mark_dirty()` ran during loading,
+        // the newer revision will cause this entry to be treated as stale.
+        cache.insert(
+            cwd.to_path_buf(),
+            CachedSkillLoadOutcome {
+                outcome: outcome.clone(),
+                revision,
+            },
+        );
         outcome
     }
 
     pub async fn skills_for_cwd(&self, cwd: &Path, force_reload: bool) -> SkillLoadOutcome {
+        let revision = self.cache_revision.load(Ordering::SeqCst);
         let cached = match self.cache_by_cwd.read() {
             Ok(cache) => cache.get(cwd).cloned(),
             Err(err) => err.into_inner().get(cwd).cloned(),
         };
-        if !force_reload && let Some(outcome) = cached {
-            return outcome;
+        if !force_reload
+            && let Some(cached) = cached
+            && cached.revision == revision
+        {
+            return cached.outcome;
         }
 
         let cwd_abs = match AbsolutePathBuf::try_from(cwd) {
@@ -111,8 +137,21 @@ impl SkillsManager {
             Ok(cache) => cache,
             Err(err) => err.into_inner(),
         };
-        cache.insert(cwd.to_path_buf(), outcome.clone());
+        // Persist the pre-load revision. If `mark_dirty()` ran during loading,
+        // the newer revision will cause this entry to be treated as stale.
+        cache.insert(
+            cwd.to_path_buf(),
+            CachedSkillLoadOutcome {
+                outcome: outcome.clone(),
+                revision,
+            },
+        );
         outcome
+    }
+
+    pub fn mark_dirty(&self) {
+        let revision = self.cache_revision.fetch_add(1, Ordering::SeqCst) + 1;
+        debug!("skills cache marked dirty (revision {revision})");
     }
 
     pub fn clear_cache(&self) {
@@ -122,7 +161,8 @@ impl SkillsManager {
         };
         let cleared = cache.len();
         cache.clear();
-        info!("skills cache cleared ({cleared} entries)");
+        let revision = self.cache_revision.fetch_add(1, Ordering::SeqCst) + 1;
+        info!("skills cache cleared ({cleared} entries, revision {revision})");
     }
 }
 
@@ -210,5 +250,14 @@ mod tests {
         let outcome2 = skills_manager.skills_for_config(&cfg);
         assert_eq!(outcome2.errors, outcome1.errors);
         assert_eq!(outcome2.skills, outcome1.skills);
+
+        // Marking the cache dirty should force a refresh for this cwd without
+        // requiring a full cache clear.
+        skills_manager.mark_dirty();
+        let outcome3 = skills_manager.skills_for_config(&cfg);
+        assert!(
+            outcome3.skills.iter().any(|s| s.name == "skill-b"),
+            "expected skill-b to be discovered after cache invalidation"
+        );
     }
 }

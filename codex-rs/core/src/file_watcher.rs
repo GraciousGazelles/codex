@@ -15,6 +15,8 @@ use notify::EventKind;
 use notify::RecommendedWatcher;
 use notify::RecursiveMode;
 use notify::Watcher;
+use notify::event::AccessKind;
+use notify::event::AccessMode;
 use notify::event::MetadataKind;
 use notify::event::ModifyKind;
 use tokio::runtime::Handle;
@@ -273,10 +275,14 @@ fn classify_event(event: &Event, state: &RwLock<WatchState>) -> Vec<PathBuf> {
 }
 
 fn is_semantic_skills_event(kind: EventKind) -> bool {
-    !matches!(
-        kind,
-        EventKind::Access(_) | EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime))
-    )
+    match kind {
+        // Some backends can report writes as close(write) access events.
+        // Keep these so real skill updates are never silently dropped.
+        EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
+        EventKind::Access(_) => false,
+        EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime)) => false,
+        _ => true,
+    }
 }
 
 fn is_skills_path(path: &Path, roots: &HashSet<PathBuf>) -> bool {
@@ -287,7 +293,8 @@ fn is_skills_path(path: &Path, roots: &HashSet<PathBuf>) -> bool {
 mod tests {
     use super::*;
     use notify::EventKind;
-    use notify::event::AccessKind;
+    use notify::event::AccessMode;
+    use notify::event::DataChange;
     use notify::event::MetadataKind;
     use notify::event::ModifyKind;
     use pretty_assertions::assert_eq;
@@ -382,6 +389,32 @@ mod tests {
     }
 
     #[test]
+    fn classify_event_ignores_read_close_access_events() {
+        let root = path("/tmp/skills");
+        let state = RwLock::new(WatchState {
+            skills_roots: HashSet::from([root.clone()]),
+        });
+        let mut event = notify_event(vec![root.join("demo/SKILL.md")]);
+        event.kind = EventKind::Access(AccessKind::Close(AccessMode::Read));
+
+        let classified = classify_event(&event, &state);
+        assert_eq!(classified, Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn classify_event_allows_write_close_access_events() {
+        let root = path("/tmp/skills");
+        let state = RwLock::new(WatchState {
+            skills_roots: HashSet::from([root.clone()]),
+        });
+        let mut event = notify_event(vec![root.join("demo/SKILL.md")]);
+        event.kind = EventKind::Access(AccessKind::Close(AccessMode::Write));
+
+        let classified = classify_event(&event, &state);
+        assert_eq!(classified, vec![root.join("demo/SKILL.md")]);
+    }
+
+    #[test]
     fn classify_event_supports_multiple_roots_without_prefix_false_positives() {
         let root_a = path("/tmp/skills");
         let root_b = path("/tmp/workspace/.codex/skills");
@@ -455,5 +488,63 @@ mod tests {
                 paths: vec![root.join("b/SKILL.md")]
             }
         );
+    }
+
+    #[tokio::test]
+    async fn spawn_event_loop_suppresses_access_storm_for_all_subscribers() {
+        let watcher = FileWatcher::noop();
+        let root = path("/tmp/skills");
+        let skill_path = root.join("demo/SKILL.md");
+        {
+            let mut state = watcher.state.write().expect("state lock");
+            state.skills_roots.insert(root);
+        }
+
+        let (raw_tx, raw_rx) = mpsc::unbounded_channel();
+        let (tx, _) = broadcast::channel(16);
+        let mut subscribers: Vec<_> = (0..7).map(|_| tx.subscribe()).collect();
+        watcher.spawn_event_loop(raw_rx, Arc::clone(&watcher.state), tx);
+
+        for _ in 0..64 {
+            let mut event = notify_event(vec![skill_path.clone()]);
+            event.kind = EventKind::Access(AccessKind::Open(AccessMode::Read));
+            raw_tx.send(Ok(event)).expect("send access event");
+        }
+
+        // Wait beyond the throttle window so delayed emissions are caught.
+        let no_event = timeout(
+            WATCHER_THROTTLE_INTERVAL + Duration::from_millis(300),
+            subscribers[0].recv(),
+        )
+        .await;
+        assert!(
+            no_event.is_err(),
+            "access-only event storms should not trigger skills change notifications"
+        );
+        for subscriber in subscribers.iter_mut().skip(1) {
+            assert_eq!(
+                subscriber.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            );
+        }
+
+        let mut semantic_event = notify_event(vec![skill_path.clone()]);
+        semantic_event.kind = EventKind::Modify(ModifyKind::Data(DataChange::Any));
+        raw_tx
+            .send(Ok(semantic_event))
+            .expect("send semantic event");
+
+        for subscriber in &mut subscribers {
+            let received = timeout(Duration::from_secs(2), subscriber.recv())
+                .await
+                .expect("semantic event should be broadcast")
+                .expect("broadcast receive semantic event");
+            assert_eq!(
+                received,
+                FileWatcherEvent::SkillsChanged {
+                    paths: vec![skill_path.clone()]
+                }
+            );
+        }
     }
 }

@@ -77,8 +77,8 @@ use futures::prelude::*;
 use futures::stream::FuturesOrdered;
 use rmcp::model::ListResourceTemplatesResult;
 use rmcp::model::ListResourcesResult;
-use rmcp::model::PaginatedRequestParam;
-use rmcp::model::ReadResourceRequestParam;
+use rmcp::model::PaginatedRequestParams;
+use rmcp::model::ReadResourceRequestParams;
 use rmcp::model::ReadResourceResult;
 use rmcp::model::RequestId;
 use serde_json;
@@ -2216,9 +2216,9 @@ impl Session {
                 .into(),
             );
         }
-        items.push(ResponseItem::from(EnvironmentContext::new(
-            Some(turn_context.cwd.clone()),
-            shell.as_ref().clone(),
+        items.push(ResponseItem::from(EnvironmentContext::from_turn_context(
+            turn_context,
+            shell.as_ref(),
         )));
         items
     }
@@ -2513,7 +2513,7 @@ impl Session {
     pub async fn list_resources(
         &self,
         server: &str,
-        params: Option<PaginatedRequestParam>,
+        params: Option<PaginatedRequestParams>,
     ) -> anyhow::Result<ListResourcesResult> {
         self.services
             .mcp_connection_manager
@@ -2526,7 +2526,7 @@ impl Session {
     pub async fn list_resource_templates(
         &self,
         server: &str,
-        params: Option<PaginatedRequestParam>,
+        params: Option<PaginatedRequestParams>,
     ) -> anyhow::Result<ListResourceTemplatesResult> {
         self.services
             .mcp_connection_manager
@@ -2539,7 +2539,7 @@ impl Session {
     pub async fn read_resource(
         &self,
         server: &str,
-        params: ReadResourceRequestParam,
+        params: ReadResourceRequestParams,
     ) -> anyhow::Result<ReadResourceResult> {
         self.services
             .mcp_connection_manager
@@ -6670,6 +6670,7 @@ mod tests {
             cwd: turn_context.cwd.clone(),
             expiration: timeout_ms.into(),
             env: HashMap::new(),
+            network: None,
             sandbox_permissions,
             windows_sandbox_level: turn_context.windows_sandbox_level,
             justification: Some("test".to_string()),
@@ -6682,6 +6683,7 @@ mod tests {
             cwd: params.cwd.clone(),
             expiration: timeout_ms.into(),
             env: HashMap::new(),
+            network: None,
             windows_sandbox_level: turn_context.windows_sandbox_level,
             justification: params.justification.clone(),
             arg0: None,

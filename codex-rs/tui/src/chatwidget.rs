@@ -274,6 +274,17 @@ enum QueuedSlashCommand {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QueuedFollowUpKind {
+    UserMessage,
+    SlashCommand,
+}
+
+enum QueuedFollowUpInput {
+    UserMessage(UserMessage),
+    SlashCommand(QueuedSlashCommand),
+}
+
 impl QueuedSlashCommand {
     fn display_text(&self) -> String {
         match self {
@@ -290,6 +301,20 @@ impl QueuedSlashCommand {
                     .unwrap_or_else(|| "default".to_string());
                 format!("/model {model} ({effort_label})")
             }
+        }
+    }
+
+    fn edit_text(&self) -> String {
+        match self {
+            QueuedSlashCommand::Command(cmd) => format!("/{}", cmd.command()),
+            QueuedSlashCommand::CommandWithArgs { cmd, args, .. } if args.is_empty() => {
+                format!("/{}", cmd.command())
+            }
+            QueuedSlashCommand::CommandWithArgs { cmd, args, .. } => {
+                format!("/{} {args}", cmd.command())
+            }
+            // `/model` is picker-driven in the TUI, so restoring the command token is enough.
+            QueuedSlashCommand::ModelSelection { .. } => "/model".to_string(),
         }
     }
 }
@@ -600,6 +625,8 @@ pub(crate) struct ChatWidget {
     queued_user_messages: VecDeque<UserMessage>,
     // Slash commands queued while a turn is in progress
     queued_slash_commands: VecDeque<QueuedSlashCommand>,
+    // Unified ordering across queued messages and slash commands.
+    queued_follow_up_order: VecDeque<QueuedFollowUpKind>,
     // Pending notification to show when unfocused on next Draw
     pending_notification: Option<Notification>,
     /// When `Some`, the user has pressed a quit shortcut and the second press
@@ -1779,6 +1806,8 @@ impl ChatWidget {
         };
 
         let mut to_merge: Vec<UserMessage> = self.queued_user_messages.drain(..).collect();
+        self.queued_follow_up_order
+            .retain(|kind| matches!(kind, QueuedFollowUpKind::SlashCommand));
         if !existing_message.text.is_empty()
             || !existing_message.local_images.is_empty()
             || !existing_message.remote_image_urls.is_empty()
@@ -2700,6 +2729,7 @@ impl ChatWidget {
             forked_from: None,
             queued_user_messages: VecDeque::new(),
             queued_slash_commands: VecDeque::new(),
+            queued_follow_up_order: VecDeque::new(),
             show_welcome_banner: is_first_run,
             suppress_session_configured_redraw: false,
             pending_notification: None,
@@ -2868,6 +2898,7 @@ impl ChatWidget {
             plan_item_active: false,
             queued_user_messages: VecDeque::new(),
             queued_slash_commands: VecDeque::new(),
+            queued_follow_up_order: VecDeque::new(),
             show_welcome_banner: is_first_run,
             suppress_session_configured_redraw: false,
             pending_notification: None,
@@ -3017,6 +3048,7 @@ impl ChatWidget {
             forked_from: None,
             queued_user_messages: VecDeque::new(),
             queued_slash_commands: VecDeque::new(),
+            queued_follow_up_order: VecDeque::new(),
             show_welcome_banner: false,
             suppress_session_configured_redraw: true,
             pending_notification: None,
@@ -3145,9 +3177,10 @@ impl ChatWidget {
                 modifiers: KeyModifiers::ALT,
                 kind: KeyEventKind::Press,
                 ..
-            } if !self.queued_user_messages.is_empty() => {
-                // Prefer the most recently queued item.
-                if let Some(user_message) = self.queued_user_messages.pop_back() {
+            } if !self.queued_user_messages.is_empty()
+                || !self.queued_slash_commands.is_empty() =>
+            {
+                if let Some(user_message) = self.pop_latest_queued_follow_up_for_edit() {
                     self.restore_user_message_to_composer(user_message);
                     self.refresh_queued_user_messages();
                     self.request_redraw();
@@ -3758,6 +3791,8 @@ impl ChatWidget {
             || self.is_review_mode
         {
             self.queued_user_messages.push_back(user_message);
+            self.queued_follow_up_order
+                .push_back(QueuedFollowUpKind::UserMessage);
             self.refresh_queued_user_messages();
         } else {
             self.submit_user_message(user_message);
@@ -3767,6 +3802,9 @@ impl ChatWidget {
     fn queue_slash_command(&mut self, queued_command: QueuedSlashCommand) {
         let command_text = queued_command.display_text();
         self.queued_slash_commands.push_back(queued_command);
+        self.queued_follow_up_order
+            .push_back(QueuedFollowUpKind::SlashCommand);
+        self.refresh_queued_user_messages();
         self.add_info_message(
             format!("Queued '{command_text}'. It will run after the current task completes."),
             None,
@@ -3781,6 +3819,8 @@ impl ChatWidget {
         if !self.is_session_configured() {
             tracing::warn!("cannot submit user message before session is configured; queueing");
             self.queued_user_messages.push_front(user_message);
+            self.queued_follow_up_order
+                .push_front(QueuedFollowUpKind::UserMessage);
             self.refresh_queued_user_messages();
             return;
         }
@@ -4369,34 +4409,35 @@ impl ChatWidget {
         if self.bottom_pane.is_task_running() {
             return;
         }
-        if let Some(user_message) = self.queued_user_messages.pop_front() {
-            self.submit_user_message(user_message);
-            self.refresh_queued_user_messages();
-            return;
-        }
-
-        if let Some(queued_command) = self.queued_slash_commands.pop_front() {
-            match queued_command {
-                QueuedSlashCommand::Command(cmd) => self.dispatch_command(cmd),
-                QueuedSlashCommand::CommandWithArgs {
-                    cmd,
-                    args,
-                    text_elements,
-                    local_images,
-                    remote_image_urls,
-                    mention_bindings,
-                } => self.dispatch_prepared_inline_command(
-                    cmd,
-                    args,
-                    text_elements,
-                    local_images,
-                    remote_image_urls,
-                    mention_bindings,
-                    false,
-                ),
-                QueuedSlashCommand::ModelSelection { model, effort } => {
-                    self.apply_model_and_effort(model, effort);
+        if let Some(queued_input) = self.pop_next_queued_follow_up() {
+            match queued_input {
+                QueuedFollowUpInput::UserMessage(user_message) => {
+                    self.submit_user_message(user_message);
+                    self.refresh_queued_user_messages();
+                    return;
                 }
+                QueuedFollowUpInput::SlashCommand(queued_command) => match queued_command {
+                    QueuedSlashCommand::Command(cmd) => self.dispatch_command(cmd),
+                    QueuedSlashCommand::CommandWithArgs {
+                        cmd,
+                        args,
+                        text_elements,
+                        local_images,
+                        remote_image_urls,
+                        mention_bindings,
+                    } => self.dispatch_prepared_inline_command(
+                        cmd,
+                        args,
+                        text_elements,
+                        local_images,
+                        remote_image_urls,
+                        mention_bindings,
+                        false,
+                    ),
+                    QueuedSlashCommand::ModelSelection { model, effort } => {
+                        self.apply_model_and_effort(model, effort);
+                    }
+                },
             }
         }
 
@@ -4404,13 +4445,81 @@ impl ChatWidget {
         self.refresh_queued_user_messages();
     }
 
+    fn pop_next_queued_follow_up(&mut self) -> Option<QueuedFollowUpInput> {
+        while let Some(kind) = self.queued_follow_up_order.pop_front() {
+            match kind {
+                QueuedFollowUpKind::UserMessage => {
+                    if let Some(message) = self.queued_user_messages.pop_front() {
+                        return Some(QueuedFollowUpInput::UserMessage(message));
+                    }
+                }
+                QueuedFollowUpKind::SlashCommand => {
+                    if let Some(command) = self.queued_slash_commands.pop_front() {
+                        return Some(QueuedFollowUpInput::SlashCommand(command));
+                    }
+                }
+            }
+        }
+
+        if let Some(message) = self.queued_user_messages.pop_front() {
+            return Some(QueuedFollowUpInput::UserMessage(message));
+        }
+        self.queued_slash_commands
+            .pop_front()
+            .map(QueuedFollowUpInput::SlashCommand)
+    }
+
+    fn pop_latest_queued_follow_up_for_edit(&mut self) -> Option<UserMessage> {
+        while let Some(kind) = self.queued_follow_up_order.pop_back() {
+            match kind {
+                QueuedFollowUpKind::UserMessage => {
+                    if let Some(message) = self.queued_user_messages.pop_back() {
+                        return Some(message);
+                    }
+                }
+                QueuedFollowUpKind::SlashCommand => {
+                    if let Some(command) = self.queued_slash_commands.pop_back() {
+                        return Some(UserMessage::from(command.edit_text()));
+                    }
+                }
+            }
+        }
+
+        if let Some(message) = self.queued_user_messages.pop_back() {
+            return Some(message);
+        }
+        self.queued_slash_commands
+            .pop_back()
+            .map(|command| UserMessage::from(command.edit_text()))
+    }
+
     /// Rebuild and update the queued user messages from the current queue.
     fn refresh_queued_user_messages(&mut self) {
-        let messages: Vec<String> = self
-            .queued_user_messages
-            .iter()
-            .map(|m| m.text.clone())
-            .collect();
+        let mut messages: Vec<String> = Vec::new();
+        let mut user_iter = self.queued_user_messages.iter();
+        let mut slash_iter = self.queued_slash_commands.iter();
+
+        if self.queued_follow_up_order.is_empty() {
+            messages.extend(user_iter.by_ref().map(|m| m.text.clone()));
+            messages.extend(slash_iter.by_ref().map(QueuedSlashCommand::display_text));
+        } else {
+            for kind in self.queued_follow_up_order.iter() {
+                match kind {
+                    QueuedFollowUpKind::UserMessage => {
+                        if let Some(message) = user_iter.next() {
+                            messages.push(message.text.clone());
+                        }
+                    }
+                    QueuedFollowUpKind::SlashCommand => {
+                        if let Some(command) = slash_iter.next() {
+                            messages.push(command.display_text());
+                        }
+                    }
+                }
+            }
+            messages.extend(user_iter.map(|m| m.text.clone()));
+            messages.extend(slash_iter.map(QueuedSlashCommand::display_text));
+        }
         self.bottom_pane.set_queued_user_messages(messages);
     }
 

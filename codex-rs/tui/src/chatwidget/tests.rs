@@ -1639,6 +1639,7 @@ async fn make_chatwidget_manual(
         show_welcome_banner: true,
         queued_user_messages: VecDeque::new(),
         queued_slash_commands: VecDeque::new(),
+        queued_follow_up_order: VecDeque::new(),
         suppress_session_configured_redraw: false,
         pending_notification: None,
         quit_shortcut_expires_at: None,
@@ -2804,6 +2805,57 @@ async fn alt_up_edits_most_recent_queued_message() {
         chat.queued_user_messages.front().unwrap().text,
         "first queued"
     );
+}
+
+#[tokio::test]
+async fn alt_up_edits_most_recent_queued_slash_command() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    // Simulate a running task so slash commands are queued.
+    chat.bottom_pane.set_task_running(true);
+    chat.dispatch_command(SlashCommand::MemoryDrop);
+    assert_eq!(chat.queued_slash_commands.len(), 1);
+
+    // Press Alt+Up to edit the queued slash command.
+    chat.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+
+    assert_eq!(
+        chat.bottom_pane.composer_text(),
+        "/debug-m-drop".to_string()
+    );
+    assert!(chat.queued_slash_commands.is_empty());
+}
+
+#[tokio::test]
+async fn alt_up_uses_strict_chronological_queue_order() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    // Simulate a running task so follow-up inputs are queued.
+    chat.bottom_pane.set_task_running(true);
+    chat.queue_user_message(UserMessage::from("first queued message".to_string()));
+    chat.dispatch_command(SlashCommand::MemoryDrop);
+    chat.queue_user_message(UserMessage::from("second queued message".to_string()));
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+    assert_eq!(
+        chat.bottom_pane.composer_text(),
+        "second queued message".to_string()
+    );
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+    assert_eq!(
+        chat.bottom_pane.composer_text(),
+        "/debug-m-drop".to_string()
+    );
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+    assert_eq!(
+        chat.bottom_pane.composer_text(),
+        "first queued message".to_string()
+    );
+
+    assert!(chat.queued_user_messages.is_empty());
+    assert!(chat.queued_slash_commands.is_empty());
 }
 
 /// Pressing Up to recall the most recent history entry and immediately queuing

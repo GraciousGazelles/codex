@@ -10,7 +10,7 @@ use crate::render::renderable::Renderable;
 use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_lines;
 
-/// Widget that displays a list of user messages queued while a turn is in progress.
+/// Widget that displays follow-up inputs queued while a turn is in progress.
 pub(crate) struct QueuedUserMessages {
     pub messages: Vec<String>,
 }
@@ -49,7 +49,7 @@ impl QueuedUserMessages {
             Line::from(vec![
                 "    ".into(),
                 key_hint::alt(KeyCode::Up).into(),
-                " edit".into(),
+                " edit queued".into(),
             ])
             .dim(),
         );

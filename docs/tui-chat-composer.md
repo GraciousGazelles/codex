@@ -119,6 +119,10 @@ the input starts with `!` (shell command).
 The same preparation path is reused for slash commands with arguments (for example `/plan` and
 `/review`) so pasted content and text elements are preserved when extracting args.
 
+While a task is running, queued follow-up entries are shown above the composer in one list. That
+preview includes both queued message drafts and queued slash commands. `Alt+Up` recalls queued
+entries for editing from that list in strict reverse-chronological order across both entry types.
+
 ### Numeric auto-submit path
 
 When the slash popup is open and the first line matches a numeric-only custom prompt with

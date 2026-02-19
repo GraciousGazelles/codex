@@ -1638,6 +1638,7 @@ async fn make_chatwidget_manual(
         frame_requester: FrameRequester::test_dummy(),
         show_welcome_banner: true,
         queued_user_messages: VecDeque::new(),
+        queued_slash_commands: VecDeque::new(),
         suppress_session_configured_redraw: false,
         pending_notification: None,
         quit_shortcut_expires_at: None,
@@ -3974,6 +3975,43 @@ async fn slash_fork_requests_current_fork() {
 }
 
 #[tokio::test]
+async fn slash_model_opens_picker_while_task_running() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.bottom_pane.set_task_running(true);
+
+    chat.dispatch_command(SlashCommand::Model);
+
+    let popup = render_bottom_popup(&chat, 80);
+    assert!(
+        popup.contains("Select Model"),
+        "expected model picker while task is running, got {popup:?}"
+    );
+    assert!(
+        chat.queued_slash_commands.is_empty(),
+        "expected /model command itself not to be queued"
+    );
+}
+
+#[tokio::test]
+async fn slash_status_is_not_queued_while_task_running() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.bottom_pane.set_task_running(true);
+
+    chat.dispatch_command(SlashCommand::Status);
+
+    assert!(
+        chat.queued_slash_commands.is_empty(),
+        "expected /status to run immediately without queueing"
+    );
+    let cells = drain_insert_history(&mut rx);
+    assert!(
+        !cells.is_empty(),
+        "expected /status output to render immediately"
+    );
+}
+
+#[tokio::test]
 async fn slash_rollout_displays_current_path() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
     let rollout_path = PathBuf::from("/tmp/codex-test-rollout.jsonl");
@@ -5355,22 +5393,117 @@ async fn user_shell_command_renders_output_not_exploring() {
 }
 
 #[tokio::test]
-async fn disabled_slash_command_while_task_running_snapshot() {
-    // Build a chat widget and simulate an active task
+async fn slash_command_queues_while_task_running() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.bottom_pane.set_task_running(true);
+
+    chat.dispatch_command(SlashCommand::MemoryDrop);
+
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+    assert_eq!(chat.queued_slash_commands.len(), 1);
+    assert!(matches!(
+        chat.queued_slash_commands.front(),
+        Some(QueuedSlashCommand::Command(SlashCommand::MemoryDrop))
+    ));
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = lines_to_single_string(cells.last().expect("expected queue info message"));
+    assert!(
+        rendered.contains("Queued '/debug-m-drop'"),
+        "expected queued command message, got {rendered:?}"
+    );
+}
+
+#[tokio::test]
+async fn queued_slash_command_runs_after_task_complete() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.bottom_pane.set_task_running(true);
+
+    chat.dispatch_command(SlashCommand::MemoryDrop);
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+
+    chat.on_task_complete(None, false);
+
+    assert_matches!(op_rx.try_recv(), Ok(Op::DropMemories));
+    assert!(chat.queued_slash_commands.is_empty());
+}
+
+#[tokio::test]
+async fn queued_inline_slash_command_runs_with_args_after_task_complete() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.bottom_pane.set_task_running(true);
+
+    chat.dispatch_command_with_args(
+        SlashCommand::Review,
+        "focus on error handling".to_string(),
+        Vec::new(),
+    );
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+
+    chat.on_task_complete(None, false);
+
+    match op_rx.try_recv() {
+        Ok(Op::Review { review_request }) => {
+            assert_eq!(
+                review_request,
+                ReviewRequest {
+                    target: ReviewTarget::Custom {
+                        instructions: "focus on error handling".to_string(),
+                    },
+                    user_facing_hint: None,
+                }
+            );
+        }
+        other => panic!("expected Op::Review, got {other:?}"),
+    }
+    assert!(chat.queued_slash_commands.is_empty());
+}
+
+#[tokio::test]
+async fn selected_model_change_queues_while_task_running() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
     chat.bottom_pane.set_task_running(true);
 
-    // Dispatch a command that is unavailable while a task runs (e.g., /model)
-    chat.dispatch_command(SlashCommand::Model);
-
-    // Drain history and snapshot the rendered error line(s)
-    let cells = drain_insert_history(&mut rx);
-    assert!(
-        !cells.is_empty(),
-        "expected an error message history cell to be emitted",
+    chat.apply_model_and_effort(
+        "gpt-5.1-codex-mini".to_string(),
+        Some(ReasoningEffortConfig::Low),
     );
-    let blob = lines_to_single_string(cells.last().unwrap());
-    assert_snapshot!(blob);
+
+    assert_eq!(chat.queued_slash_commands.len(), 1);
+    assert!(matches!(
+        chat.queued_slash_commands.front(),
+        Some(QueuedSlashCommand::ModelSelection {
+            model,
+            effort: Some(ReasoningEffortConfig::Low),
+        }) if model == "gpt-5.1-codex-mini"
+    ));
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = lines_to_single_string(cells.last().expect("expected queue info message"));
+    assert!(
+        rendered.contains("Queued '/model gpt-5.1-codex-mini"),
+        "expected queued model selection message, got {rendered:?}"
+    );
+
+    chat.on_task_complete(None, false);
+
+    let mut saw_model = false;
+    let mut saw_effort = false;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            AppEvent::UpdateModel(model) if model == "gpt-5.1-codex-mini" => saw_model = true,
+            AppEvent::UpdateReasoningEffort(Some(ReasoningEffortConfig::Low)) => saw_effort = true,
+            _ => {}
+        }
+    }
+    assert!(
+        saw_model,
+        "expected queued model to apply after task completion"
+    );
+    assert!(
+        saw_effort,
+        "expected queued reasoning effort to apply after task completion"
+    );
 }
 
 #[tokio::test]

@@ -89,9 +89,10 @@ Key effects when disabled:
   `input_modalities`; attach and submit paths also re-check support and emit a warning instead of
   dropping the draft.
 
-Built-in slash command availability is centralized in
-`codex-rs/tui/src/bottom_pane/slash_commands.rs` and reused by both the composer and the command
-popup so gating stays in sync.
+Built-in slash command metadata is centralized in
+`codex-rs/tui/src/bottom_pane/slash_commands.rs` and reused by both the composer and command popup
+for command discovery and parsing. Task-running availability is enforced by `ChatWidget`, which
+can queue unavailable commands and run them after the active task completes.
 
 ## Submission flow (Enter/Tab)
 

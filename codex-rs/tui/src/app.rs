@@ -2231,6 +2231,9 @@ impl App {
             AppEvent::OpenRealtimeAudioDeviceSelection { kind } => {
                 self.chat_widget.open_realtime_audio_device_selection(kind);
             }
+            AppEvent::SelectModel { model, effort } => {
+                self.chat_widget.apply_model_and_effort(model, effort);
+            }
             AppEvent::OpenReasoningPopup { model } => {
                 self.chat_widget.open_reasoning_popup(model);
             }

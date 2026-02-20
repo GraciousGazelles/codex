@@ -135,7 +135,9 @@ async fn process_review_events(
     receiver: async_channel::Receiver<Event>,
 ) -> (Option<ReviewOutputEvent>, Option<TokenUsage>) {
     let mut prev_agent_message: Option<Event> = None;
-    let mut previous_total_usage = session.clone_session().total_token_usage().await;
+    // TokenCount events in this flow come from the review subagent session, so
+    // initialize from the first subagent event rather than parent-session totals.
+    let mut previous_total_usage: Option<TokenUsage> = None;
     let mut review_token_usage = TokenUsage::default();
     while let Ok(event) = receiver.recv().await {
         match event.clone().msg {

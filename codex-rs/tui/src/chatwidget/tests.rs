@@ -5562,6 +5562,32 @@ async fn selected_model_change_queues_while_task_running() {
 }
 
 #[tokio::test]
+async fn queued_compact_runs_after_queued_model_selection() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.bottom_pane.set_task_running(true);
+
+    chat.apply_model_and_effort(
+        "gpt-5.1-codex-mini".to_string(),
+        Some(ReasoningEffortConfig::Low),
+    );
+    chat.dispatch_command(SlashCommand::Compact);
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+
+    chat.on_task_complete(None, false);
+
+    while let Ok(_op) = op_rx.try_recv() {}
+    let mut saw_compact = false;
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event, AppEvent::CodexOp(Op::Compact)) {
+            saw_compact = true;
+            break;
+        }
+    }
+    assert!(saw_compact, "expected queued /compact to emit Op::Compact");
+    assert!(chat.queued_slash_commands.is_empty());
+}
+
+#[tokio::test]
 async fn approvals_popup_shows_disabled_presets() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
 

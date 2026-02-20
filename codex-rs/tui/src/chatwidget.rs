@@ -4438,6 +4438,12 @@ impl ChatWidget {
                     ),
                     QueuedSlashCommand::ModelSelection { model, effort } => {
                         self.apply_model_and_effort(model, effort);
+                        if !self.bottom_pane.is_task_running() {
+                            // Applying a queued model change does not start a turn, so continue
+                            // draining queued follow-ups immediately (e.g. queued `/compact`).
+                            self.maybe_send_next_queued_input();
+                            return;
+                        }
                     }
                 },
             }

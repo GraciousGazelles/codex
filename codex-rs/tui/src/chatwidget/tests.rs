@@ -1420,6 +1420,7 @@ async fn review_restores_context_window_indicator() {
         id: "review-end".into(),
         msg: EventMsg::ExitedReviewMode(ExitedReviewModeEvent {
             review_output: None,
+            review_token_usage: None,
         }),
     });
     let _ = drain_insert_history(&mut rx);

@@ -415,7 +415,8 @@ async fn review_uses_custom_review_model_from_config() {
         matches!(
             ev,
             EventMsg::ExitedReviewMode(ExitedReviewModeEvent {
-                review_output: None
+                review_output: None,
+                ..
             })
         )
     })
@@ -467,7 +468,8 @@ async fn review_uses_session_model_when_review_model_unset() {
         matches!(
             ev,
             EventMsg::ExitedReviewMode(ExitedReviewModeEvent {
-                review_output: None
+                review_output: None,
+                ..
             })
         )
     })
@@ -585,7 +587,8 @@ async fn review_input_isolated_from_parent_history() {
         matches!(
             ev,
             EventMsg::ExitedReviewMode(ExitedReviewModeEvent {
-                review_output: None
+                review_output: None,
+                ..
             })
         )
     })
@@ -696,7 +699,8 @@ async fn review_history_surfaces_in_parent_session() {
         matches!(
             ev,
             EventMsg::ExitedReviewMode(ExitedReviewModeEvent {
-                review_output: Some(_)
+                review_output: Some(_),
+                ..
             })
         )
     })

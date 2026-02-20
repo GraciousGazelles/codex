@@ -4304,8 +4304,12 @@ impl ChatWidget {
     }
 
     fn on_exited_review_mode(&mut self, review: ExitedReviewModeEvent) {
+        let ExitedReviewModeEvent {
+            review_output,
+            review_token_usage,
+        } = review;
         // Leave review mode; if output is present, flush pending stream + show results.
-        if let Some(output) = review.review_output {
+        if let Some(output) = review_output {
             self.flush_answer_stream_with_separator();
             self.flush_interrupt_queue();
             self.flush_active_cell();
@@ -4335,6 +4339,14 @@ impl ChatWidget {
         self.add_to_history(history_cell::new_review_status_line(
             "<< Code review finished >>".to_string(),
         ));
+        if let Some(token_usage) = review_token_usage
+            && !token_usage.is_zero()
+        {
+            let usage_message = codex_core::protocol::FinalOutput::from(token_usage).to_string();
+            self.add_to_history(history_cell::new_review_status_line(format!(
+                "<< Review {usage_message} >>"
+            )));
+        }
         self.request_redraw();
     }
 

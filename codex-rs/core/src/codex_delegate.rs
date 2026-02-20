@@ -575,7 +575,10 @@ mod tests {
             .unwrap();
         drop(tx_events);
 
-        let received = rx_out.recv().await.expect("token count event not forwarded");
+        let received = rx_out
+            .recv()
+            .await
+            .expect("token count event not forwarded");
         assert_eq!("token", received.id);
         assert!(matches!(received.msg, EventMsg::TokenCount(_)));
 

@@ -42,6 +42,7 @@ use crate::app_event::RealtimeAudioDeviceKind;
 use crate::audio_device::list_realtime_audio_device_names;
 use crate::bottom_pane::StatusLineItem;
 use crate::bottom_pane::StatusLineSetupView;
+use crate::status::RATE_LIMIT_STALE_THRESHOLD_MINUTES;
 use crate::status::RateLimitWindowDisplay;
 use crate::status::format_directory_display;
 use crate::status::format_tokens_compact;
@@ -275,6 +276,7 @@ use crate::streaming::controller::PlanStreamController;
 use crate::streaming::controller::StreamController;
 
 use chrono::DateTime;
+use chrono::Duration as ChronoDuration;
 use chrono::Local;
 use codex_core::AuthManager;
 use codex_core::CodexAuth;
@@ -5170,6 +5172,7 @@ impl ChatWidget {
                 let snapshot = self.rate_limit_snapshots_by_limit_id.get("codex");
                 let window = snapshot.and_then(|s| s.secondary.as_ref());
                 let captured_at = snapshot.map(|snapshot| snapshot.captured_at);
+                let rendered_at = Local::now();
                 let label = window
                     .and_then(|window| window.window_minutes)
                     .map(get_limits_duration)
@@ -5178,7 +5181,7 @@ impl ChatWidget {
                     window
                         .and_then(|window| {
                             captured_at.and_then(|captured_at| {
-                                self.status_line_weekly_pace(window, captured_at)
+                                self.status_line_weekly_pace(window, captured_at, rendered_at)
                             })
                         })
                         .map(|pace| format!("{base} ({pace})"))
@@ -5251,7 +5254,14 @@ impl ChatWidget {
         &self,
         window: &RateLimitWindowDisplay,
         captured_at: DateTime<Local>,
+        rendered_at: DateTime<Local>,
     ) -> Option<String> {
+        if rendered_at.signed_duration_since(captured_at)
+            > ChronoDuration::minutes(RATE_LIMIT_STALE_THRESHOLD_MINUTES)
+        {
+            return None;
+        }
+
         let resets_at_unix_seconds = window.resets_at_unix_seconds?;
         let window_minutes = window.window_minutes?;
         if window_minutes <= 0 {

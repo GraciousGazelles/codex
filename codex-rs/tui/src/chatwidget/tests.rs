@@ -8527,7 +8527,7 @@ async fn status_line_weekly_limit_pacing_on_pace_at_positive_epsilon_boundary() 
     };
 
     let signal = chat.status_line_weekly_pace(&window, captured_at);
-    assert_eq!(signal.as_deref(), Some("on pace"));
+    assert_eq!(signal, Some(WeeklyPacingSignal::OnPace));
 }
 
 #[tokio::test]
@@ -8544,7 +8544,7 @@ async fn status_line_weekly_limit_pacing_on_pace_at_negative_epsilon_boundary() 
     };
 
     let signal = chat.status_line_weekly_pace(&window, captured_at);
-    assert_eq!(signal.as_deref(), Some("on pace"));
+    assert_eq!(signal, Some(WeeklyPacingSignal::OnPace));
 }
 
 #[tokio::test]
@@ -8605,7 +8605,7 @@ async fn status_line_weekly_limit_pacing_at_stale_threshold_remains_non_stale() 
     let rendered_at = captured_at + chrono::Duration::minutes(15);
 
     let signal = chat.status_line_weekly_signal(&window, captured_at, rendered_at);
-    assert_eq!(signal.as_deref(), Some("on pace"));
+    assert_eq!(signal, Some(WeeklyPacingSignal::OnPace));
 }
 
 #[tokio::test]
@@ -8621,7 +8621,7 @@ async fn status_line_weekly_limit_pacing_one_second_past_stale_threshold_shows_s
     let rendered_at = captured_at + chrono::Duration::minutes(15) + chrono::Duration::seconds(1);
 
     let signal = chat.status_line_weekly_signal(&window, captured_at, rendered_at);
-    assert_eq!(signal.as_deref(), Some("stale"));
+    assert_eq!(signal, Some(WeeklyPacingSignal::Stale));
 }
 
 #[tokio::test]

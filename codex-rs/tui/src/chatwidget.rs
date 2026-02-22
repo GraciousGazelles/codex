@@ -1918,7 +1918,7 @@ impl ChatWidget {
             }
 
             for (model, effort) in queued_model_selections {
-                self.apply_model_and_effort(model, effort);
+                self.apply_model_and_effort_immediately(model, effort);
             }
             self.refresh_queued_user_messages();
         } else {
@@ -6019,6 +6019,14 @@ impl ChatWidget {
             return;
         }
 
+        self.apply_model_and_effort_immediately(model, effort);
+    }
+
+    fn apply_model_and_effort_immediately(
+        &mut self,
+        model: String,
+        effort: Option<ReasoningEffortConfig>,
+    ) {
         // Keep local mode state in sync before draining any queued follow-ups so the next
         // submission uses the selected model/effort even before app-level events are processed.
         self.set_model(&model);

@@ -6990,7 +6990,8 @@ async fn interrupt_keeps_queued_slash_commands_pending() {
 #[tokio::test]
 async fn interrupt_applies_queued_model_selection_immediately() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.1-codex-max")).await;
-    chat.bottom_pane.set_task_running(true);
+    chat.mcp_startup_status = Some(HashMap::new());
+    chat.update_task_running_state();
     let _ = drain_insert_history(&mut rx);
 
     chat.apply_model_and_effort(
@@ -7019,6 +7020,10 @@ async fn interrupt_applies_queued_model_selection_immediately() {
         chat.queued_slash_commands.front(),
         Some(QueuedSlashCommand::Command(SlashCommand::Clear))
     ));
+    assert_eq!(
+        chat.queued_follow_up_order,
+        VecDeque::from([QueuedFollowUpKind::SlashCommand])
+    );
     assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
 
     let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();

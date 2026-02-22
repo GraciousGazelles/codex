@@ -6988,6 +6988,62 @@ async fn interrupt_keeps_queued_slash_commands_pending() {
 }
 
 #[tokio::test]
+async fn interrupt_applies_queued_model_selection_immediately() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.1-codex-max")).await;
+    chat.bottom_pane.set_task_running(true);
+    let _ = drain_insert_history(&mut rx);
+
+    chat.apply_model_and_effort(
+        "gpt-5.1-codex-mini".to_string(),
+        Some(ReasoningEffortConfig::Low),
+    );
+    chat.dispatch_command(SlashCommand::Clear);
+    assert_eq!(chat.queued_slash_commands.len(), 2);
+    let _ = drain_insert_history(&mut rx);
+
+    chat.handle_codex_event(Event {
+        id: "turn-1".into(),
+        msg: EventMsg::TurnAborted(codex_protocol::protocol::TurnAbortedEvent {
+            turn_id: Some("turn-1".to_string()),
+            reason: TurnAbortReason::Interrupted,
+        }),
+    });
+
+    assert_eq!(chat.current_model(), "gpt-5.1-codex-mini");
+    assert_eq!(
+        chat.effective_reasoning_effort(),
+        Some(ReasoningEffortConfig::Low)
+    );
+    assert_eq!(chat.queued_slash_commands.len(), 1);
+    assert!(matches!(
+        chat.queued_slash_commands.front(),
+        Some(QueuedSlashCommand::Command(SlashCommand::Clear))
+    ));
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+
+    let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+    assert!(
+        events.iter().any(
+            |event| matches!(event, AppEvent::UpdateModel(model) if model == "gpt-5.1-codex-mini")
+        ),
+        "expected queued model selection to apply after interrupt"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AppEvent::UpdateReasoningEffort(Some(ReasoningEffortConfig::Low))
+        )),
+        "expected queued reasoning effort to apply after interrupt"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, AppEvent::ClearUi)),
+        "queued slash commands other than model selection should remain pending after interrupt"
+    );
+}
+
+#[tokio::test]
 async fn interrupt_prepends_queued_messages_before_existing_composer_text() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
 

@@ -1897,7 +1897,31 @@ impl ChatWidget {
             self.refresh_queued_user_messages();
         }
 
-        if reason != TurnAbortReason::Interrupted {
+        if reason == TurnAbortReason::Interrupted {
+            let mut queued_model_selections = Vec::new();
+            let mut remaining_slash_commands = VecDeque::new();
+
+            while let Some(queued_command) = self.queued_slash_commands.pop_front() {
+                match queued_command {
+                    QueuedSlashCommand::ModelSelection { model, effort } => {
+                        queued_model_selections.push((model, effort));
+                    }
+                    other => remaining_slash_commands.push_back(other),
+                }
+            }
+            self.queued_slash_commands = remaining_slash_commands;
+
+            self.queued_follow_up_order.clear();
+            for _ in 0..self.queued_slash_commands.len() {
+                self.queued_follow_up_order
+                    .push_back(QueuedFollowUpKind::SlashCommand);
+            }
+
+            for (model, effort) in queued_model_selections {
+                self.apply_model_and_effort(model, effort);
+            }
+            self.refresh_queued_user_messages();
+        } else {
             self.maybe_send_next_queued_input();
         }
         self.request_redraw();

@@ -5022,6 +5022,19 @@ async fn slash_copy_does_not_return_stale_output_after_thread_rollback() {
         ),
         "expected rollback-cleared copy state message, got {rendered:?}"
     );
+
+#[tokio::test]
+async fn slash_quit_is_not_queued_while_task_running() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.bottom_pane.set_task_running(true);
+
+    chat.dispatch_command(SlashCommand::Quit);
+
+    assert!(
+        chat.queued_slash_commands.is_empty(),
+        "expected /quit to bypass queued slash-command flow"
+    );
+    assert_matches!(rx.try_recv(), Ok(AppEvent::Exit(ExitMode::ShutdownFirst)));
 }
 
 #[tokio::test]

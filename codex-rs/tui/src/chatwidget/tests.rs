@@ -6204,6 +6204,38 @@ async fn queued_inline_slash_command_runs_with_args_after_task_complete() {
 }
 
 #[tokio::test]
+async fn queued_inline_slash_command_expands_pending_paste_payload_before_queueing() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.bottom_pane.set_task_running(true);
+    chat.bottom_pane
+        .set_composer_text("/review ".to_string(), Vec::new(), Vec::new());
+
+    let pasted = "x".repeat(1101);
+    chat.handle_paste(pasted.clone());
+    let composer_text = chat.bottom_pane.composer_text();
+    let args = composer_text
+        .strip_prefix("/review ")
+        .expect("composer should include /review prefix")
+        .to_string();
+    assert_ne!(
+        args, pasted,
+        "expected queued args to start from placeholder text"
+    );
+
+    chat.dispatch_command_with_args(SlashCommand::Review, args, Vec::new());
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+
+    assert_eq!(chat.queued_slash_commands.len(), 1);
+    match chat.queued_slash_commands.front() {
+        Some(QueuedSlashCommand::CommandWithArgs { cmd, args, .. }) => {
+            assert_eq!(*cmd, SlashCommand::Review);
+            assert_eq!(args, &pasted);
+        }
+        _ => panic!("expected queued inline /review command"),
+    }
+}
+
+#[tokio::test]
 async fn queued_inline_plan_slash_command_captures_prepared_mention_bindings() {
     let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
     chat.bottom_pane.set_task_running(true);
@@ -6922,6 +6954,37 @@ async fn interrupt_restores_queued_messages_into_composer() {
 
     // Drain rx to avoid unused warnings.
     let _ = drain_insert_history(&mut rx);
+}
+
+#[tokio::test]
+async fn interrupt_keeps_queued_slash_commands_pending() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.bottom_pane.set_task_running(true);
+    chat.dispatch_command(SlashCommand::Clear);
+    assert_eq!(chat.queued_slash_commands.len(), 1);
+    let _ = drain_insert_history(&mut rx);
+
+    chat.handle_codex_event(Event {
+        id: "turn-1".into(),
+        msg: EventMsg::TurnAborted(codex_protocol::protocol::TurnAbortedEvent {
+            turn_id: Some("turn-1".to_string()),
+            reason: TurnAbortReason::Interrupted,
+        }),
+    });
+
+    assert_eq!(chat.queued_slash_commands.len(), 1);
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+
+    let mut saw_clear = false;
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event, AppEvent::ClearUi) {
+            saw_clear = true;
+        }
+    }
+    assert!(
+        !saw_clear,
+        "queued slash command should remain pending after interrupt"
+    );
 }
 
 #[tokio::test]

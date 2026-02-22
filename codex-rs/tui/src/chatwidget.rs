@@ -1897,7 +1897,9 @@ impl ChatWidget {
             self.refresh_queued_user_messages();
         }
 
-        self.maybe_send_next_queued_input();
+        if reason != TurnAbortReason::Interrupted {
+            self.maybe_send_next_queued_input();
+        }
         self.request_redraw();
     }
 

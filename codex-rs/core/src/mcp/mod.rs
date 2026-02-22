@@ -139,7 +139,10 @@ fn codex_apps_mcp_server_config(config: &Config, auth: Option<&CodexAuth>) -> Mc
         enabled_tools: None,
         disabled_tools: None,
         scopes: None,
-        oauth_resource: None,
+        enable_elicitation: true,
+        read_only: false,
+        strict_tool_classification: false,
+        require_approval_for_mutating: false,
     }
 }
 

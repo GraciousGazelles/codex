@@ -29,12 +29,6 @@
         "$ref": "#/definitions/AgentRoleToml"
       },
       "properties": {
-        "job_max_runtime_seconds": {
-          "description": "Default maximum runtime in seconds for agent job workers.",
-          "format": "uint64",
-          "minimum": 1.0,
-          "type": "integer"
-        },
         "max_depth": {
           "description": "Maximum nesting depth allowed for spawned agent threads. Root sessions start at depth 0.",
           "format": "int32",
@@ -328,9 +322,6 @@
             "connectors": {
               "type": "boolean"
             },
-            "default_mode_request_user_input": {
-              "type": "boolean"
-            },
             "elevated_windows_sandbox": {
               "type": "boolean"
             },
@@ -358,9 +349,6 @@
             "js_repl_tools_only": {
               "type": "boolean"
             },
-            "memories": {
-              "type": "boolean"
-            },
             "memory_tool": {
               "type": "boolean"
             },
@@ -376,13 +364,7 @@
             "prevent_idle_sleep": {
               "type": "boolean"
             },
-            "realtime_conversation": {
-              "type": "boolean"
-            },
             "remote_models": {
-              "type": "boolean"
-            },
-            "request_permissions": {
               "type": "boolean"
             },
             "request_rule": {
@@ -428,9 +410,6 @@
               "type": "boolean"
             },
             "use_linux_sandbox_bwrap": {
-              "type": "boolean"
-            },
-            "voice_transcription": {
               "type": "boolean"
             },
             "web_search": {
@@ -613,10 +592,6 @@
       "additionalProperties": false,
       "description": "Memories settings loaded from config.toml.",
       "properties": {
-        "generate_memories": {
-          "description": "When `false`, newly created threads are stored with `memory_mode = \"disabled\"` in the state DB.",
-          "type": "boolean"
-        },
         "max_raw_memories_for_global": {
           "description": "Maximum number of recent raw memories retained for global consolidation.",
           "format": "uint",
@@ -634,11 +609,6 @@
           "minimum": 0.0,
           "type": "integer"
         },
-        "max_unused_days": {
-          "description": "Maximum number of days since a memory was last used before it becomes ineligible for phase 2 selection.",
-          "format": "int64",
-          "type": "integer"
-        },
         "min_rollout_idle_hours": {
           "description": "Minimum idle time between last thread activity and memory creation (hours). > 12h recommended.",
           "format": "int64",
@@ -651,19 +621,7 @@
         "phase_2_model": {
           "description": "Model used for memory consolidation.",
           "type": "string"
-        },
-        "use_memories": {
-          "description": "When `false`, skip injecting memory usage instructions into developer prompts.",
-          "type": "boolean"
         }
-      },
-      "type": "object"
-    },
-    "ModelAvailabilityNuxConfig": {
-      "additionalProperties": {
-        "format": "uint32",
-        "minimum": 0.0,
-        "type": "integer"
       },
       "type": "object"
     },
@@ -1124,6 +1082,10 @@
           },
           "type": "array"
         },
+        "enable_elicitation": {
+          "default": null,
+          "type": "boolean"
+        },
         "enabled": {
           "default": null,
           "type": "boolean"
@@ -1162,9 +1124,13 @@
           },
           "type": "object"
         },
-        "oauth_resource": {
+        "read_only": {
           "default": null,
-          "type": "string"
+          "type": "boolean"
+        },
+        "require_approval_for_mutating": {
+          "default": null,
+          "type": "boolean"
         },
         "required": {
           "default": null,
@@ -1188,24 +1154,16 @@
           "format": "double",
           "type": "number"
         },
+        "strict_tool_classification": {
+          "default": null,
+          "type": "boolean"
+        },
         "tool_timeout_sec": {
           "default": null,
           "format": "double",
           "type": "number"
         },
         "url": {
-          "type": "string"
-        }
-      },
-      "type": "object"
-    },
-    "RealtimeAudioToml": {
-      "additionalProperties": false,
-      "properties": {
-        "microphone": {
-          "type": "string"
-        },
-        "speaker": {
           "type": "string"
         }
       },
@@ -1428,15 +1386,6 @@
           "description": "Enable animations (welcome screen, shimmer effects, spinners). Defaults to `true`.",
           "type": "boolean"
         },
-        "model_availability_nux": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/ModelAvailabilityNuxConfig"
-            }
-          ],
-          "default": {},
-          "description": "Startup tooltip availability NUX state persisted by the TUI."
-        },
         "notification_method": {
           "allOf": [
             {
@@ -1467,11 +1416,6 @@
             "type": "string"
           },
           "type": "array"
-        },
-        "theme": {
-          "default": null,
-          "description": "Syntax highlighting theme name (kebab-case).\n\nWhen set, overrides automatic light/dark theme detection. Use `/theme` in the TUI or see `$CODEX_HOME/themes` for custom themes.",
-          "type": "string"
         }
       },
       "type": "object"
@@ -1581,16 +1525,7 @@
       "default": null,
       "description": "Settings for app-specific controls."
     },
-    "audio": {
-      "allOf": [
-        {
-          "$ref": "#/definitions/RealtimeAudioToml"
-        }
-      ],
-      "default": null,
-      "description": "Machine-local realtime audio device preferences used by realtime voice."
-    },
-    "background_terminal_max_timeout": {
+    "background_terminal_timeout": {
       "description": "Maximum poll window for background terminal output (`write_stdin`), in milliseconds. Default: `300000` (5 minutes).",
       "format": "uint64",
       "minimum": 0.0,
@@ -1676,9 +1611,6 @@
         "connectors": {
           "type": "boolean"
         },
-        "default_mode_request_user_input": {
-          "type": "boolean"
-        },
         "elevated_windows_sandbox": {
           "type": "boolean"
         },
@@ -1706,9 +1638,6 @@
         "js_repl_tools_only": {
           "type": "boolean"
         },
-        "memories": {
-          "type": "boolean"
-        },
         "memory_tool": {
           "type": "boolean"
         },
@@ -1724,13 +1653,7 @@
         "prevent_idle_sleep": {
           "type": "boolean"
         },
-        "realtime_conversation": {
-          "type": "boolean"
-        },
         "remote_models": {
-          "type": "boolean"
-        },
-        "request_permissions": {
           "type": "boolean"
         },
         "request_rule": {
@@ -1776,9 +1699,6 @@
           "type": "boolean"
         },
         "use_linux_sandbox_bwrap": {
-          "type": "boolean"
-        },
-        "voice_transcription": {
           "type": "boolean"
         },
         "web_search": {
@@ -2100,14 +2020,6 @@
         }
       ],
       "description": "User-level skill config entries keyed by SKILL.md path."
-    },
-    "sqlite_home": {
-      "allOf": [
-        {
-          "$ref": "#/definitions/AbsolutePathBuf"
-        }
-      ],
-      "description": "Directory where Codex stores the SQLite state DB. Defaults to `$CODEX_SQLITE_HOME` when set. Otherwise uses `$CODEX_HOME`."
     },
     "suppress_unstable_features_warning": {
       "description": "Suppress warnings about unstable (under development) features.",

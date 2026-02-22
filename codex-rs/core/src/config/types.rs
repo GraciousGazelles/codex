@@ -26,8 +26,7 @@ pub const DEFAULT_OTEL_ENVIRONMENT: &str = "dev";
 pub const DEFAULT_MEMORIES_MAX_ROLLOUTS_PER_STARTUP: usize = 16;
 pub const DEFAULT_MEMORIES_MAX_ROLLOUT_AGE_DAYS: i64 = 30;
 pub const DEFAULT_MEMORIES_MIN_ROLLOUT_IDLE_HOURS: i64 = 6;
-pub const DEFAULT_MEMORIES_MAX_RAW_MEMORIES_FOR_GLOBAL: usize = 256;
-pub const DEFAULT_MEMORIES_MAX_UNUSED_DAYS: i64 = 30;
+pub const DEFAULT_MEMORIES_MAX_RAW_MEMORIES_FOR_GLOBAL: usize = 1_024;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -100,9 +99,25 @@ pub struct McpServerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scopes: Option<Vec<String>>,
 
-    /// Optional OAuth resource parameter to include during MCP login (RFC 8707).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub oauth_resource: Option<String>,
+    /// Advertise MCP elicitation capability to this server.
+    ///
+    /// When enabled, the server can request user input through MCP elicitation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub enable_elicitation: bool,
+
+    /// Enforce read-only behavior for this server by blocking mutating tools.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
+
+    /// Fail closed when a tool does not advertise read-only classification metadata.
+    ///
+    /// This applies only when read-only enforcement or mutation approval policy is enabled.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub strict_tool_classification: bool,
+
+    /// Require explicit user approval before running mutating tools.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_approval_for_mutating: bool,
 }
 
 // Raw MCP config shape used for deserialization and JSON Schema generation.
@@ -148,7 +163,13 @@ pub(crate) struct RawMcpServerConfig {
     #[serde(default)]
     pub scopes: Option<Vec<String>>,
     #[serde(default)]
-    pub oauth_resource: Option<String>,
+    pub enable_elicitation: Option<bool>,
+    #[serde(default)]
+    pub read_only: Option<bool>,
+    #[serde(default)]
+    pub strict_tool_classification: Option<bool>,
+    #[serde(default)]
+    pub require_approval_for_mutating: Option<bool>,
 }
 
 impl<'de> Deserialize<'de> for McpServerConfig {
@@ -172,7 +193,16 @@ impl<'de> Deserialize<'de> for McpServerConfig {
         let enabled_tools = raw.enabled_tools.clone();
         let disabled_tools = raw.disabled_tools.clone();
         let scopes = raw.scopes.clone();
-        let oauth_resource = raw.oauth_resource.clone();
+        let enable_elicitation = raw.enable_elicitation.unwrap_or(false);
+        let read_only = raw.read_only.unwrap_or(false);
+        let strict_tool_classification = raw.strict_tool_classification.unwrap_or(false);
+        let require_approval_for_mutating = raw.require_approval_for_mutating.unwrap_or(false);
+
+        if require_approval_for_mutating && !enable_elicitation {
+            return Err(SerdeError::custom(
+                "require_approval_for_mutating requires enable_elicitation=true",
+            ));
+        }
 
         fn throw_if_set<E, T>(transport: &str, field: &str, value: Option<&T>) -> Result<(), E>
         where
@@ -196,7 +226,6 @@ impl<'de> Deserialize<'de> for McpServerConfig {
             throw_if_set("stdio", "bearer_token", raw.bearer_token.as_ref())?;
             throw_if_set("stdio", "http_headers", raw.http_headers.as_ref())?;
             throw_if_set("stdio", "env_http_headers", raw.env_http_headers.as_ref())?;
-            throw_if_set("stdio", "oauth_resource", raw.oauth_resource.as_ref())?;
             McpServerTransportConfig::Stdio {
                 command,
                 args: raw.args.clone().unwrap_or_default(),
@@ -230,7 +259,10 @@ impl<'de> Deserialize<'de> for McpServerConfig {
             enabled_tools,
             disabled_tools,
             scopes,
-            oauth_resource,
+            enable_elicitation,
+            read_only,
+            strict_tool_classification,
+            require_approval_for_mutating,
         })
     }
 }
@@ -371,14 +403,8 @@ pub struct FeedbackConfigToml {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct MemoriesToml {
-    /// When `false`, newly created threads are stored with `memory_mode = "disabled"` in the state DB.
-    pub generate_memories: Option<bool>,
-    /// When `false`, skip injecting memory usage instructions into developer prompts.
-    pub use_memories: Option<bool>,
     /// Maximum number of recent raw memories retained for global consolidation.
     pub max_raw_memories_for_global: Option<usize>,
-    /// Maximum number of days since a memory was last used before it becomes ineligible for phase 2 selection.
-    pub max_unused_days: Option<i64>,
     /// Maximum age of the threads used for memories.
     pub max_rollout_age_days: Option<i64>,
     /// Maximum number of rollout candidates processed per pass.
@@ -394,10 +420,7 @@ pub struct MemoriesToml {
 /// Effective memories settings after defaults are applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoriesConfig {
-    pub generate_memories: bool,
-    pub use_memories: bool,
     pub max_raw_memories_for_global: usize,
-    pub max_unused_days: i64,
     pub max_rollout_age_days: i64,
     pub max_rollouts_per_startup: usize,
     pub min_rollout_idle_hours: i64,
@@ -408,10 +431,7 @@ pub struct MemoriesConfig {
 impl Default for MemoriesConfig {
     fn default() -> Self {
         Self {
-            generate_memories: true,
-            use_memories: true,
             max_raw_memories_for_global: DEFAULT_MEMORIES_MAX_RAW_MEMORIES_FOR_GLOBAL,
-            max_unused_days: DEFAULT_MEMORIES_MAX_UNUSED_DAYS,
             max_rollout_age_days: DEFAULT_MEMORIES_MAX_ROLLOUT_AGE_DAYS,
             max_rollouts_per_startup: DEFAULT_MEMORIES_MAX_ROLLOUTS_PER_STARTUP,
             min_rollout_idle_hours: DEFAULT_MEMORIES_MIN_ROLLOUT_IDLE_HOURS,
@@ -425,16 +445,10 @@ impl From<MemoriesToml> for MemoriesConfig {
     fn from(toml: MemoriesToml) -> Self {
         let defaults = Self::default();
         Self {
-            generate_memories: toml.generate_memories.unwrap_or(defaults.generate_memories),
-            use_memories: toml.use_memories.unwrap_or(defaults.use_memories),
             max_raw_memories_for_global: toml
                 .max_raw_memories_for_global
                 .unwrap_or(defaults.max_raw_memories_for_global)
                 .min(4096),
-            max_unused_days: toml
-                .max_unused_days
-                .unwrap_or(defaults.max_unused_days)
-                .clamp(0, 365),
             max_rollout_age_days: toml
                 .max_rollout_age_days
                 .unwrap_or(defaults.max_rollout_age_days)
@@ -667,14 +681,6 @@ impl fmt::Display for NotificationMethod {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
-#[schemars(deny_unknown_fields)]
-pub struct ModelAvailabilityNuxConfig {
-    /// Number of times a startup availability NUX has been shown per model slug.
-    #[serde(default, flatten)]
-    pub shown_count: HashMap<String, u32>,
-}
-
 /// Collection of settings that are specific to the TUI.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
@@ -717,17 +723,6 @@ pub struct Tui {
     /// `current-dir`.
     #[serde(default)]
     pub status_line: Option<Vec<String>>,
-
-    /// Syntax highlighting theme name (kebab-case).
-    ///
-    /// When set, overrides automatic light/dark theme detection.
-    /// Use `/theme` in the TUI or see `$CODEX_HOME/themes` for custom themes.
-    #[serde(default)]
-    pub theme: Option<String>,
-
-    /// Startup tooltip availability NUX state persisted by the TUI.
-    #[serde(default)]
-    pub model_availability_nux: ModelAvailabilityNuxConfig,
 }
 
 const fn default_true() -> bool {
@@ -1125,22 +1120,6 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_streamable_http_server_config_with_oauth_resource() {
-        let cfg: McpServerConfig = toml::from_str(
-            r#"
-            url = "https://example.com/mcp"
-            oauth_resource = "https://api.example.com"
-        "#,
-        )
-        .expect("should deserialize http config with oauth_resource");
-
-        assert_eq!(
-            cfg.oauth_resource,
-            Some("https://api.example.com".to_string())
-        );
-    }
-
-    #[test]
     fn deserialize_server_config_with_tool_filters() {
         let cfg: McpServerConfig = toml::from_str(
             r#"
@@ -1153,6 +1132,42 @@ mod tests {
 
         assert_eq!(cfg.enabled_tools, Some(vec!["allowed".to_string()]));
         assert_eq!(cfg.disabled_tools, Some(vec!["blocked".to_string()]));
+    }
+
+    #[test]
+    fn deserialize_server_config_with_elicitation_and_policy_flags() {
+        let cfg: McpServerConfig = toml::from_str(
+            r#"
+            command = "echo"
+            enable_elicitation = true
+            read_only = true
+            strict_tool_classification = true
+            require_approval_for_mutating = true
+        "#,
+        )
+        .expect("should deserialize policy flags");
+
+        assert!(cfg.enable_elicitation);
+        assert!(cfg.read_only);
+        assert!(cfg.strict_tool_classification);
+        assert!(cfg.require_approval_for_mutating);
+    }
+
+    #[test]
+    fn deserialize_rejects_mutation_approval_without_elicitation() {
+        let err = toml::from_str::<McpServerConfig>(
+            r#"
+            command = "echo"
+            require_approval_for_mutating = true
+        "#,
+        )
+        .expect_err("should reject invalid policy combination");
+
+        assert!(
+            err.to_string()
+                .contains("require_approval_for_mutating requires enable_elicitation=true"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1194,20 +1209,6 @@ mod tests {
         "#,
         )
         .expect_err("should reject env_http_headers for stdio transport");
-
-        let err = toml::from_str::<McpServerConfig>(
-            r#"
-            command = "echo"
-            oauth_resource = "https://api.example.com"
-        "#,
-        )
-        .expect_err("should reject oauth_resource for stdio transport");
-
-        assert!(
-            err.to_string()
-                .contains("oauth_resource is not supported for stdio"),
-            "unexpected error: {err}"
-        );
     }
 
     #[test]

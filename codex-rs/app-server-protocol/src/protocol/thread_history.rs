@@ -1225,6 +1225,7 @@ mod tests {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: turn_id.to_string(),
                 last_agent_message: None,
+                compaction_events_in_turn: 0,
             }),
         ];
 
@@ -1542,6 +1543,7 @@ mod tests {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
                 last_agent_message: None,
+                compaction_events_in_turn: 0,
             }),
         ];
 
@@ -1839,6 +1841,7 @@ mod tests {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
                 last_agent_message: None,
+                compaction_events_in_turn: 0,
             }),
             EventMsg::TurnStarted(TurnStartedEvent {
                 turn_id: "turn-b".into(),
@@ -1873,6 +1876,7 @@ mod tests {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-b".into(),
                 last_agent_message: None,
+                compaction_events_in_turn: 0,
             }),
         ];
 
@@ -1921,6 +1925,7 @@ mod tests {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
                 last_agent_message: None,
+                compaction_events_in_turn: 0,
             }),
             EventMsg::TurnStarted(TurnStartedEvent {
                 turn_id: "turn-b".into(),
@@ -1955,6 +1960,7 @@ mod tests {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-b".into(),
                 last_agent_message: None,
+                compaction_events_in_turn: 0,
             }),
         ];
 
@@ -1997,6 +2003,7 @@ mod tests {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
                 last_agent_message: None,
+                compaction_events_in_turn: 0,
             }),
             EventMsg::TurnStarted(TurnStartedEvent {
                 turn_id: "turn-b".into(),
@@ -2012,6 +2019,7 @@ mod tests {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
                 last_agent_message: None,
+                compaction_events_in_turn: 0,
             }),
             EventMsg::AgentMessage(AgentMessageEvent {
                 message: "still in b".into(),
@@ -2020,6 +2028,7 @@ mod tests {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-b".into(),
                 last_agent_message: None,
+                compaction_events_in_turn: 0,
             }),
         ];
 
@@ -2051,6 +2060,7 @@ mod tests {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
                 last_agent_message: None,
+                compaction_events_in_turn: 0,
             }),
             EventMsg::TurnStarted(TurnStartedEvent {
                 turn_id: "turn-b".into(),
@@ -2100,6 +2110,7 @@ mod tests {
             RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-compact".into(),
                 last_agent_message: None,
+                compaction_events_in_turn: 0,
             })),
         ];
 
@@ -2211,6 +2222,7 @@ mod tests {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
                 last_agent_message: None,
+                compaction_events_in_turn: 0,
             }),
             EventMsg::Error(ErrorEvent {
                 message: "request-level failure".into(),
@@ -2264,6 +2276,7 @@ mod tests {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
                 last_agent_message: None,
+                compaction_events_in_turn: 0,
             }),
         ];
 

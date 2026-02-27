@@ -1531,6 +1531,12 @@
       "minimum": 0.0,
       "type": "integer"
     },
+    "background_terminal_max_timeout": {
+      "description": "Maximum poll window for background terminal output (`write_stdin`), in milliseconds. Default: `7200000` (2 hours).",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
     "chatgpt_base_url": {
       "description": "Base URL for requests to ChatGPT (as opposed to the OpenAI API).",
       "type": "string"

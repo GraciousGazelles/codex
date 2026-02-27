@@ -425,7 +425,7 @@ pub struct Config {
     pub use_experimental_unified_exec_tool: bool,
 
     /// Maximum poll window for background terminal output (`write_stdin`), in milliseconds.
-    /// Default: `300000` (5 minutes).
+    /// Default: `7200000` (2 hours).
     pub background_terminal_max_timeout: u64,
 
     /// Settings for ghost snapshots (used for undo).
@@ -1072,8 +1072,13 @@ pub struct ConfigToml {
     pub tool_output_token_limit: Option<usize>,
 
     /// Maximum poll window for background terminal output (`write_stdin`), in milliseconds.
+    /// Backward-compatible legacy key.
     /// Default: `300000` (5 minutes).
     pub background_terminal_timeout: Option<u64>,
+
+    /// Maximum poll window for background terminal output (`write_stdin`), in milliseconds.
+    /// Default: `7200000` (2 hours).
+    pub background_terminal_max_timeout: Option<u64>,
 
     /// Optional absolute path to the Node runtime used by `js_repl`.
     pub js_repl_node_path: Option<AbsolutePathBuf>,
@@ -1801,7 +1806,8 @@ impl Config {
             .transpose()?
             .unwrap_or_default();
         let background_terminal_max_timeout = cfg
-            .background_terminal_timeout
+            .background_terminal_max_timeout
+            .or(cfg.background_terminal_timeout)
             .unwrap_or(DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS)
             .max(MIN_EMPTY_YIELD_TIME_MS);
 

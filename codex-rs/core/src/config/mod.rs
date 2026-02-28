@@ -278,6 +278,12 @@ pub struct Config {
     /// `current-dir`.
     pub tui_status_line: Option<Vec<String>>,
 
+    /// Require `Esc Esc` (double-press) to interrupt in the TUI.
+    pub tui_double_esc_interrupt: bool,
+
+    /// Syntax highlighting theme override (kebab-case name).
+    pub tui_theme: Option<String>,
+
     /// The directory that should be treated as the current working directory
     /// for the session. All relative paths inside the business-logic layer are
     /// resolved against this path.
@@ -2126,6 +2132,12 @@ impl Config {
                 .map(|t| t.alternate_screen)
                 .unwrap_or_default(),
             tui_status_line: cfg.tui.as_ref().and_then(|t| t.status_line.clone()),
+            tui_double_esc_interrupt: cfg
+                .tui
+                .as_ref()
+                .map(|t| t.double_esc_interrupt)
+                .unwrap_or(true),
+            tui_theme: cfg.tui.as_ref().and_then(|t| t.theme.clone()),
             otel: {
                 let t: OtelConfigToml = cfg.otel.unwrap_or_default();
                 let log_user_prompt = t.log_user_prompt.unwrap_or(false);
@@ -2550,8 +2562,49 @@ allowed_domains = ["openai.com"]
                 animations: true,
                 show_tooltips: true,
                 alternate_screen: AltScreenMode::Auto,
+                double_esc_interrupt: true,
                 status_line: None,
+                theme: None,
             }
+        );
+    }
+
+    #[test]
+    fn tui_theme_deserializes_from_toml() {
+        let cfg = r#"
+[tui]
+theme = "dracula"
+"#;
+        let parsed =
+            toml::from_str::<ConfigToml>(cfg).expect("TOML deserialization should succeed");
+        assert_eq!(
+            parsed.tui.as_ref().and_then(|t| t.theme.as_deref()),
+            Some("dracula"),
+        );
+    }
+
+    #[test]
+    fn tui_theme_defaults_to_none() {
+        let cfg = r#"
+[tui]
+"#;
+        let parsed =
+            toml::from_str::<ConfigToml>(cfg).expect("TOML deserialization should succeed");
+        assert_eq!(parsed.tui.as_ref().and_then(|t| t.theme.as_deref()), None);
+    }
+
+    #[test]
+    fn tui_double_esc_interrupt_deserializes_false() {
+        let cfg = r#"
+[tui]
+double_esc_interrupt = false
+"#;
+
+        let parsed = toml::from_str::<ConfigToml>(cfg)
+            .expect("TUI config with double_esc_interrupt should deserialize");
+        assert_eq!(
+            parsed.tui.as_ref().map(|t| t.double_esc_interrupt),
+            Some(false)
         );
     }
 
@@ -4712,6 +4765,8 @@ model_verbosity = "high"
                 feedback_enabled: true,
                 tui_alternate_screen: AltScreenMode::Auto,
                 tui_status_line: None,
+                tui_double_esc_interrupt: true,
+                tui_theme: None,
                 otel: OtelConfig::default(),
             },
             o3_profile_config
@@ -4834,6 +4889,8 @@ model_verbosity = "high"
             feedback_enabled: true,
             tui_alternate_screen: AltScreenMode::Auto,
             tui_status_line: None,
+            tui_double_esc_interrupt: true,
+            tui_theme: None,
             otel: OtelConfig::default(),
         };
 
@@ -4954,6 +5011,8 @@ model_verbosity = "high"
             feedback_enabled: true,
             tui_alternate_screen: AltScreenMode::Auto,
             tui_status_line: None,
+            tui_double_esc_interrupt: true,
+            tui_theme: None,
             otel: OtelConfig::default(),
         };
 
@@ -5060,6 +5119,8 @@ model_verbosity = "high"
             feedback_enabled: true,
             tui_alternate_screen: AltScreenMode::Auto,
             tui_status_line: None,
+            tui_double_esc_interrupt: true,
+            tui_theme: None,
             otel: OtelConfig::default(),
         };
 

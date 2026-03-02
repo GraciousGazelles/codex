@@ -7335,6 +7335,16 @@
                 "type": "null"
               }
             ]
+          },
+          "planType": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/PlanType"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "title": "AccountUpdatedNotification",

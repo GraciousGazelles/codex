@@ -5,6 +5,10 @@ set positional-arguments
 help:
     just -l
 
+[no-cd]
+install-branch-artifact *args:
+    ./scripts/install-sedna-branch-artifact.sh "$@"
+
 # `codex`
 alias c := codex
 codex *args:

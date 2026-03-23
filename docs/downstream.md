@@ -40,8 +40,25 @@ git remote set-url origin git@github.com:SednaLabs/codex.git
 
 - local Build Helper runs are the default narrow lane for formatting, smoke tests, and targeted checks
 - heavy Rust tests, release-mode builds, and preview binaries should be offloaded to GitHub Actions after commit and push
+- on this old shared host, GitHub branch builds and heavy test runs are typically about 2-3x faster than local CPU-bound runs and avoid starving other agents while the work is in flight
 - branch artifacts are disposable and retain for 3 days
 - official releases are published only from the protected Sedna release workflow
+
+## Installing a branch artifact
+
+If you want to try a successful branch build locally without rebuilding on this machine, install the latest successful branch artifact with:
+
+```bash
+just install-branch-artifact --branch <branch-name>
+```
+
+You can also target a specific successful GitHub Actions run:
+
+```bash
+just install-branch-artifact --run-id <run-id>
+```
+
+The helper downloads the latest successful `sedna-branch-build` artifact, backs up any existing local `codex` install under `~/.local/bin`, installs both `codex` and `codex-responses-api-proxy`, and prints the resulting `codex --version`.
 
 ## Divergence Summary
 

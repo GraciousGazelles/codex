@@ -34,28 +34,22 @@ impl ToolHandler for Handler {
         } = invocation;
         let arguments = function_arguments(payload)?;
         let args: WaitArgs = parse_arguments(&arguments)?;
-        let receiver_thread_ids = match (&args.ids, &args.targets) {
-            (Some(ids), Some(targets)) if !ids.is_empty() && !targets.is_empty() => {
+        let ids = args.ids.as_ref().filter(|ids| !ids.is_empty());
+        let targets = args.targets.as_ref().filter(|targets| !targets.is_empty());
+        let receiver_thread_ids = match (ids, targets) {
+            (Some(_ids), Some(_targets)) => {
                 return Err(FunctionCallError::RespondToModel(
                     "provide either ids or targets, but not both".to_string(),
                 ));
             }
-            (Some(ids), _) => {
-                if ids.is_empty() {
-                    return Err(FunctionCallError::RespondToModel(
-                        "ids must be non-empty".to_string(),
-                    ));
-                }
-                ids.iter()
-                    .map(|id| {
-                        ThreadId::from_string(id).map_err(|err| {
-                            FunctionCallError::RespondToModel(format!(
-                                "invalid agent id {id}: {err}"
-                            ))
-                        })
+            (Some(ids), None) => ids
+                .iter()
+                .map(|id| {
+                    ThreadId::from_string(id).map_err(|err| {
+                        FunctionCallError::RespondToModel(format!("invalid agent id {id}: {err}"))
                     })
-                    .collect::<Result<Vec<_>, _>>()?
-            }
+                })
+                .collect::<Result<Vec<_>, _>>()?,
             (None, Some(targets)) => {
                 resolve_agent_targets(&session, &turn, targets.clone()).await?
             }

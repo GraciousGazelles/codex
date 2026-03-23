@@ -61,7 +61,7 @@ impl ToolHandler for Handler {
             }
             (None, None) => {
                 return Err(FunctionCallError::RespondToModel(
-                    "ids must be non-empty".to_string(),
+                    "provide ids or targets".to_string(),
                 ));
             }
         };

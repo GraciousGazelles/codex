@@ -104,17 +104,6 @@ User-visible behavior:
 - Downstream docs and operator guidance prefer MCP tool surfaces that can block in-tool until useful state changes occur.
 - The intended execution model is: start work, block on the tool contract, resume on a terminal or timeout condition, rather than simulate a scheduler in the chat transcript.
 
-### Code mode: imported tool declarations instead of inline `tools` const examples
-
-Why:
-- Keep downstream code-mode declarations aligned with the imported namespace pattern used by the current carry branch tool metadata exporter.
-- Preserve the downstream formatting that pairs builtin and namespaced MCP tool metadata with a shared imported `tools` namespace instead of an inline `declare const tools` example.
-
-User-visible behavior:
-- Code-mode declarations use the imported form `import { tools } from "..."; declare function ...`.
-- Builtin tool metadata and namespaced MCP tool metadata are documented and tested against the same imported namespace shape.
-- Downstream code-mode examples therefore differ slightly from upstream examples that still inline `declare const tools: { ... }`.
-
 ### Sub-agent orchestration: override preservation, richer inventory, and blocking joins
 
 Why:

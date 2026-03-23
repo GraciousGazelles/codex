@@ -199,16 +199,6 @@ live divergence.
   - `docs/tui-weekly-usage-pacing-status-line.md`
   - `docs/downstream.md`
 
-### Code-Mode Declaration Formatting
-
-- the downstream branch (`main`; historically `carry/main`) still emits imported tool declarations of the form:
-  `import { tools } from "..."; declare function ...`
-- `upstream/main` still emits the older inline
-  `declare const tools: { ... }` example.
-- This is a live carry-only divergence.
-- Primary files:
-  - `codex-rs/core/src/tools/code_mode_description.rs`
-
 ## Not Counted As Standalone Live Divergences
 
 - Merge and sync history:

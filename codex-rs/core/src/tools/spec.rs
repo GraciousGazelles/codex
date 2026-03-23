@@ -1661,15 +1661,25 @@ fn create_resume_agent_tool() -> ToolSpec {
 fn create_wait_agent_tool() -> ToolSpec {
     let mut properties = BTreeMap::new();
     properties.insert(
-            "ids".to_string(),
-            JsonSchema::Array {
-                items: Box::new(JsonSchema::String { description: None }),
-                description: Some(
-                    "One or more agent IDs to wait for. Returns when any requested agent matches `return_when`.".
-                        to_string(),
-                ),
-            },
-        );
+        "ids".to_string(),
+        JsonSchema::Array {
+            items: Box::new(JsonSchema::String { description: None }),
+            description: Some(
+                "Optional raw agent IDs to wait for. Use this when you already have concrete thread IDs. Cannot be combined with `targets`."
+                    .to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "targets".to_string(),
+        JsonSchema::Array {
+            items: Box::new(JsonSchema::String { description: None }),
+            description: Some(
+                "Optional agent references to wait for. Accepts raw IDs or canonical task names returned by `spawn_agent`. Prefer this when chaining from a named spawn. Cannot be combined with `ids`."
+                    .to_string(),
+            ),
+        },
+    );
     properties.insert(
         "timeout_ms".to_string(),
         JsonSchema::Number {
@@ -1690,14 +1700,14 @@ fn create_wait_agent_tool() -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: "wait_agent".to_string(),
-        description: "Use this for blocking coordination while awaiting sub-agent completion. The call blocks until the requested `return_when` condition is met or the timeout is reached. Prefer longer timeouts (minutes) to avoid short-polling loops, and favor `list_agents` for non-blocking snapshots before calling `wait_agent` when you really need the transition to finish.
+        description: "Use this for blocking coordination while awaiting sub-agent completion. Provide either `ids` or `targets`, then the call blocks until the requested `return_when` condition is met or the timeout is reached. Prefer longer timeouts (minutes) to avoid short-polling loops, and favor `list_agents` for non-blocking snapshots before calling `wait_agent` when you really need the transition to finish.
 When `return_when` is `any`, the call returns as soon as one requested agent becomes terminal. When `return_when` is `all`, it waits for every requested agent to reach a terminal state before returning."
             .to_string(),
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::Object {
             properties,
-            required: Some(vec!["ids".to_string()]),
+            required: None,
             additional_properties: Some(false.into()),
         },
         output_schema: Some(wait_output_schema()),

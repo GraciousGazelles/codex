@@ -1,0 +1,104 @@
+name: main list_agents native enum fix v2
+
+on:
+  push:
+    branches:
+      - main-list-agents-enum-fix
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: main-list-agents-enum-fix-native-v2
+  cancel-in-progress: true
+
+jobs:
+  rewrite-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            codex-rs
+
+      - name: Rewrite enum handling to native schema support
+        shell: bash
+        run: |
+          set -euo pipefail
+          python <<'PY'
+          from pathlib import Path
+          import re
+
+          def add_enum_values_to_string_variants(text: str) -> str:
+              pattern = re.compile(r'JsonSchema::String \{([^{}]*?)\}', re.S)
+
+              def repl(match):
+                  body = match.group(1)
+                  if 'enum_values' in body:
+                      return match.group(0)
+                  body = body.rstrip()
+                  if body.endswith(','):
+                      body = body[:-1].rstrip()
+                  return f'JsonSchema::String {{{body}, enum_values: None }}'
+
+              return pattern.sub(repl, text)
+
+          spec_path = Path('codex-rs/core/src/tools/spec.rs')
+          spec = spec_path.read_text()
+          spec = spec.replace(
+              '    String {\n        #[serde(skip_serializing_if = "Option::is_none")]\n        description: Option<String>,\n    },',
+              '    String {\n        #[serde(skip_serializing_if = "Option::is_none")]\n        description: Option<String>,\n        #[serde(rename = "enum", skip_serializing_if = "Option::is_none")]\n        enum_values: Option<Vec<String>>,\n    },'
+          )
+          spec = add_enum_values_to_string_variants(spec)
+          spec = spec.replace(
+              '        let mut json = serde_json::to_value(tool)?;\n        maybe_inject_tool_schema_enums(&mut json);\n',
+              '        let json = serde_json::to_value(tool)?;\n'
+          )
+          spec = re.sub(
+              r'\nfn maybe_inject_tool_schema_enums\(tool_json: &mut serde_json::Value\) \{.*?\n\}\n\nfn push_tool_spec\(',
+              '\nfn push_tool_spec(',
+              spec,
+              flags=re.S,
+          )
+          spec = re.sub(
+              r'("descendant_edge_status"\.to_string\(\),\n\s*)JsonSchema::String \{.*?enum_values: None \},',
+              '\\1JsonSchema::String {\n            description: Some(\n                "Optional subtree filter for `include_descendants=true`. Use `open` or `closed` to limit returned descendant rows by persisted spawn-edge status. Cannot be combined with `ids`."\n                    .to_string(),\n            ),\n            enum_values: Some(vec!["open".to_string(), "closed".to_string()]),\n        },',
+              spec,
+              flags=re.S,
+          )
+          spec_path.write_text(spec)
+
+          spec_tests_path = Path('codex-rs/core/src/tools/spec_tests.rs')
+          spec_tests = spec_tests_path.read_text()
+          spec_tests = add_enum_values_to_string_variants(spec_tests)
+          spec_tests_path.write_text(spec_tests)
+          PY
+
+      - name: Run codex-core test suite
+        working-directory: codex-rs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p codex-core --locked
+
+      - name: Commit rewritten fix back to branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add codex-rs/core/src/tools/spec.rs codex-rs/core/src/tools/spec_tests.rs
+          git rm -f .github/workflows/main-list-agents-enum-native-fix.yml
+          git rm -f .github/workflows/main-list-agents-enum-native-fix-v2.yml
+          git commit -m "Use native JsonSchema string enums for list_agents descendant_edge_status"
+          git push origin HEAD:${GITHUB_REF_NAME}

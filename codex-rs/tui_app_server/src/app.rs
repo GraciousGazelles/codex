@@ -1285,7 +1285,7 @@ impl App {
             ));
         }
         let current_cwd = self.config.cwd.clone();
-        let mut config = match session {
+        let mut config = match session.as_ref() {
             Some(session) => {
                 self.rebuild_config_for_resume_or_fallback(&current_cwd, session.cwd.clone())
                     .await?

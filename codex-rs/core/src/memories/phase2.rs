@@ -756,6 +756,21 @@ pub(in crate::memories) mod agent {
         let contents = serde_json::to_vec_pretty(&attestation)
             .map_err(|err| std::io::Error::other(format!("serialize attestation: {err}")))?;
         let memory_root_key = memory_root_attestation_key(root);
+        let root_buf = root.to_path_buf();
+        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            let path =
+                consolidation_artifact_attestation_path(root_buf.as_path()).ok_or_else(|| {
+                    std::io::Error::other("memory root is missing a codex_home parent")
+                })?;
+            let mut file = open_write_regular_file_no_follow(&path)?;
+            use std::io::Write as _;
+            file.write_all(&contents)?;
+            file.flush()?;
+            write_consolidation_artifact_attestation_support_marker(root_buf.as_path())
+        })
+        .await
+        .map_err(|err| std::io::Error::other(format!("join attestation write task: {err}")))??;
+
         if let Some(state_db) = state_db {
             state_db
                 .mark_global_phase2_attestation_required_for_root(memory_root_key.as_str())
@@ -764,21 +779,6 @@ pub(in crate::memories) mod agent {
                     std::io::Error::other(format!("persist attestation requirement state: {err}"))
                 })?;
         }
-
-        let root = root.to_path_buf();
-        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            let path =
-                consolidation_artifact_attestation_path(root.as_path()).ok_or_else(|| {
-                    std::io::Error::other("memory root is missing a codex_home parent")
-                })?;
-            let mut file = open_write_regular_file_no_follow(&path)?;
-            use std::io::Write as _;
-            file.write_all(&contents)?;
-            file.flush()?;
-            write_consolidation_artifact_attestation_support_marker(root.as_path())
-        })
-        .await
-        .map_err(|err| std::io::Error::other(format!("join attestation write task: {err}")))??;
 
         Ok(())
     }

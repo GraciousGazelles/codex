@@ -116,6 +116,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::path::PathBuf;
@@ -1047,6 +1048,7 @@ pub(crate) struct App {
     thread_event_channels: HashMap<ThreadId, ThreadEventChannel>,
     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
     agent_navigation: AgentNavigationState,
+    hydrated_agent_metadata_threads: HashSet<ThreadId>,
     active_thread_id: Option<ThreadId>,
     active_thread_rx: Option<Receiver<QueuedThreadEvent>>,
     primary_thread_id: Option<ThreadId>,
@@ -2566,8 +2568,9 @@ impl App {
     /// This runs on every buffered thread notification before it reaches rendering. For each
     /// receiver thread id that the navigation cache does not yet have metadata for, it issues a
     /// `thread/read` RPC and registers the result in both `AgentNavigationState` and the
-    /// `ChatWidget` metadata map. Threads that already have a nickname or role cached are skipped,
-    /// so the cost is at most one RPC per thread over the lifetime of a session.
+    /// `ChatWidget` metadata map. Threads with metadata already hydrated are skipped, even when
+    /// the authoritative nickname and role are both absent, so the cost is at most one RPC per
+    /// thread over the lifetime of a session.
     ///
     /// Failures are logged and silently ignored -- the worst outcome is that a rendered item shows
     /// a thread id instead of a human-readable name, which is the same behavior the TUI had before
@@ -2590,11 +2593,7 @@ impl App {
                 continue;
             };
 
-            if self
-                .agent_navigation
-                .get(&thread_id)
-                .is_some_and(|entry| entry.agent_nickname.is_some() || entry.agent_role.is_some())
-            {
+            if self.has_hydrated_agent_picker_thread_metadata(&thread_id) {
                 continue;
             }
 
@@ -2604,7 +2603,7 @@ impl App {
             {
                 Ok(thread) => {
                     self.ensure_thread_channel(thread_id);
-                    self.upsert_agent_picker_thread(
+                    self.upsert_hydrated_agent_picker_thread(
                         thread_id,
                         thread.agent_nickname,
                         thread.agent_role,
@@ -2646,7 +2645,7 @@ impl App {
         session.history_log_id = 0;
         session.history_entry_count = 0;
         session.rollout_path = rollout_path;
-        self.upsert_agent_picker_thread(
+        self.upsert_hydrated_agent_picker_thread(
             thread_id,
             notification.thread.agent_nickname.clone(),
             notification.thread.agent_role.clone(),
@@ -3013,6 +3012,21 @@ impl App {
         self.sync_active_agent_label();
     }
 
+    fn upsert_hydrated_agent_picker_thread(
+        &mut self,
+        thread_id: ThreadId,
+        agent_nickname: Option<String>,
+        agent_role: Option<String>,
+        is_closed: bool,
+    ) {
+        self.upsert_agent_picker_thread(thread_id, agent_nickname, agent_role, is_closed);
+        self.hydrated_agent_metadata_threads.insert(thread_id);
+    }
+
+    fn has_hydrated_agent_picker_thread_metadata(&self, thread_id: &ThreadId) -> bool {
+        self.hydrated_agent_metadata_threads.contains(thread_id)
+    }
+
     /// Marks a cached picker thread closed and recomputes the contextual footer label.
     ///
     /// Closing a thread is not the same as removing it: users can still inspect finished agent
@@ -3197,6 +3211,7 @@ impl App {
         self.thread_event_channels.clear();
         self.thread_approval_overrides.clear();
         self.agent_navigation.clear();
+        self.hydrated_agent_metadata_threads.clear();
         self.active_thread_id = None;
         self.active_thread_rx = None;
         self.primary_thread_id = None;
@@ -3335,7 +3350,7 @@ impl App {
 
         for thread in find_loaded_subagent_threads_for_primary(threads, primary_thread_id) {
             self.ensure_thread_channel(thread.thread_id);
-            self.upsert_agent_picker_thread(
+            self.upsert_hydrated_agent_picker_thread(
                 thread.thread_id,
                 thread.agent_nickname,
                 thread.agent_role,
@@ -3726,6 +3741,7 @@ impl App {
             thread_event_channels: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
+            hydrated_agent_metadata_threads: HashSet::new(),
             active_thread_id: None,
             active_thread_rx: None,
             primary_thread_id: None,
@@ -7442,6 +7458,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hydrated_empty_collab_agent_metadata_is_cached() -> Result<()> {
+        let mut app = make_test_app().await;
+        let thread_id = ThreadId::new();
+
+        app.upsert_agent_picker_thread(
+            thread_id, /*agent_nickname*/ None, /*agent_role*/ None,
+            /*is_closed*/ false,
+        );
+
+        assert!(!app.has_hydrated_agent_picker_thread_metadata(&thread_id));
+        assert_eq!(
+            app.agent_navigation.get(&thread_id),
+            Some(&AgentPickerThreadEntry {
+                agent_nickname: None,
+                agent_role: None,
+                is_closed: false,
+            })
+        );
+
+        app.upsert_hydrated_agent_picker_thread(
+            thread_id, /*agent_nickname*/ None, /*agent_role*/ None,
+            /*is_closed*/ false,
+        );
+
+        assert!(app.has_hydrated_agent_picker_thread_metadata(&thread_id));
+        assert_eq!(
+            app.agent_navigation.get(&thread_id),
+            Some(&AgentPickerThreadEntry {
+                agent_nickname: None,
+                agent_role: None,
+                is_closed: false,
+            })
+        );
+
+        app.reset_thread_event_state();
+
+        assert!(!app.has_hydrated_agent_picker_thread_metadata(&thread_id));
+        assert_eq!(app.agent_navigation.get(&thread_id), None);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn open_agent_picker_prompts_to_enable_multi_agent_when_disabled() -> Result<()> {
         let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
         let _ = app.config.features.disable(Feature::Collab);
@@ -8795,6 +8853,7 @@ guardian_approval = true
             thread_event_channels: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
+            hydrated_agent_metadata_threads: HashSet::new(),
             active_thread_id: None,
             active_thread_rx: None,
             primary_thread_id: None,
@@ -8846,6 +8905,7 @@ guardian_approval = true
                 thread_event_channels: HashMap::new(),
                 thread_event_listener_tasks: HashMap::new(),
                 agent_navigation: AgentNavigationState::default(),
+                hydrated_agent_metadata_threads: HashSet::new(),
                 active_thread_id: None,
                 active_thread_rx: None,
                 primary_thread_id: None,

@@ -3614,12 +3614,8 @@ impl ChatWidget {
                             call_id: id,
                             sender_thread_id,
                             receiver_thread_id,
-                            receiver_agent_nickname: first_receiver_metadata
-                                .as_ref()
-                                .and_then(|metadata| metadata.agent_nickname.clone()),
-                            receiver_agent_role: first_receiver_metadata
-                                .as_ref()
-                                .and_then(|metadata| metadata.agent_role.clone()),
+                            receiver_agent_nickname: first_receiver_nickname.clone(),
+                            receiver_agent_role: first_receiver_role.clone(),
                             status: receiver_thread_ids
                                 .iter()
                                 .find_map(|thread_id| agents_states.get(thread_id))

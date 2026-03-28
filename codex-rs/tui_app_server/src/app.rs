@@ -155,6 +155,8 @@ use self::pending_interactive_replay::PendingInteractiveReplayState;
 
 const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";
 const THREAD_EVENT_CHANNEL_CAPACITY: usize = 32768;
+const SUBAGENT_BACKFILL_RETRY_COOLDOWN: Duration = Duration::from_secs(5);
+const SUBAGENT_BACKFILL_FAILURE_RETRY_COOLDOWN: Duration = Duration::from_secs(1);
 
 type ThreadLoadedListFetchFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ThreadLoadedListResponse>> + Send + 'a>>;
@@ -775,6 +777,13 @@ struct ParkedThreadState {
     thread_id: ThreadId,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct SubagentBackfillAttempt {
+    primary_thread_id: ThreadId,
+    attempted_at: Instant,
+    success: bool,
+}
+
 impl ThreadEventChannel {
     fn new(capacity: usize) -> Self {
         let (sender, receiver) = mpsc_channel(capacity);
@@ -1090,7 +1099,7 @@ pub(crate) struct App {
     active_thread_id: Option<ThreadId>,
     active_thread_rx: Option<Receiver<QueuedThreadEvent>>,
     primary_thread_id: Option<ThreadId>,
-    last_subagent_backfill_attempt: Option<ThreadId>,
+    last_subagent_backfill_attempt: Option<SubagentBackfillAttempt>,
     primary_session_configured: Option<ThreadSessionState>,
     pending_primary_events: VecDeque<ThreadBufferedEvent>,
     pending_app_server_requests: PendingAppServerRequests,
@@ -1925,8 +1934,7 @@ impl App {
         self.active_thread_rx = Some(receiver);
 
         let init = self.chatwidget_init_for_forked_or_resumed_thread(tui, self.config.clone());
-        self.chat_widget = ChatWidget::new_with_app_event(init);
-        self.sync_active_agent_label();
+        self.replace_chat_widget(ChatWidget::new_with_app_event(init));
         self.reset_for_thread_switch(tui)?;
         self.replay_thread_snapshot(snapshot, /*resume_restored_queue*/ true);
         self.drain_active_thread_events(tui).await?;
@@ -2798,11 +2806,26 @@ impl App {
         Ok(())
     }
 
-    async fn enqueue_primary_thread_session(
+    async fn attach_primary_thread_session_with_backfill<P>(
+        &mut self,
+        provider: &mut P,
+        session: ThreadSessionState,
+        turns: Vec<Turn>,
+    ) -> Result<()>
+    where
+        P: ThreadBackfillProvider,
+    {
+        let turns = self.begin_primary_thread_session(session, turns).await?;
+        self.backfill_loaded_subagent_threads_with_provider(provider)
+            .await;
+        self.finalize_primary_thread_session_replay(turns).await
+    }
+
+    async fn begin_primary_thread_session(
         &mut self,
         session: ThreadSessionState,
         turns: Vec<Turn>,
-    ) -> Result<()> {
+    ) -> Result<Vec<Turn>> {
         let mut session = session;
         let thread_id = session.thread_id;
         if let Some(approval_override) = self.thread_approval_overrides.remove(&thread_id) {
@@ -2823,6 +2846,13 @@ impl App {
         self.chat_widget
             .set_initial_user_message_submit_suppressed(/*suppressed*/ true);
         self.chat_widget.handle_thread_session(session);
+        Ok(turns)
+    }
+
+    async fn finalize_primary_thread_session_replay(&mut self, turns: Vec<Turn>) -> Result<()> {
+        let thread_id = self
+            .primary_thread_id
+            .expect("finalizing primary session requires an active thread");
         self.chat_widget
             .replay_thread_turns(turns, ReplayKind::ResumeInitialMessages);
         let pending = std::mem::take(&mut self.pending_primary_events);
@@ -3109,7 +3139,7 @@ impl App {
         }
 
         let mut resume_config = match self
-            .rebuild_config_for_thread_session_or_current(thread_id, None)
+            .rebuild_config_for_thread_session_or_current(thread_id, /*session*/ None)
             .await
         {
             Ok(config) => config,
@@ -3170,14 +3200,11 @@ impl App {
                         &approval_override,
                     );
                 }
-                self.thread_event_channels.insert(
-                    thread_id,
-                    ThreadEventChannel::new_with_session(
-                        THREAD_EVENT_CHANNEL_CAPACITY,
-                        session.clone(),
-                        turns,
-                    ),
-                );
+                {
+                    let channel = self.ensure_thread_channel(thread_id);
+                    let mut store = channel.store.lock().await;
+                    store.set_session(session.clone(), turns);
+                }
                 if self.primary_thread_id == Some(thread_id) {
                     self.primary_session_configured = Some(session);
                 }
@@ -3435,9 +3462,12 @@ impl App {
         self.reset_thread_event_state();
         let init = self.chatwidget_init_for_forked_or_resumed_thread(tui, self.config.clone());
         self.replace_chat_widget(ChatWidget::new_with_app_event(init));
-        self.enqueue_primary_thread_session(started.session, started.turns)
-            .await?;
-        self.backfill_loaded_subagent_threads(app_server).await;
+        self.attach_primary_thread_session_with_backfill(
+            app_server,
+            started.session,
+            started.turns,
+        )
+        .await?;
         Ok(())
     }
 
@@ -3507,6 +3537,7 @@ impl App {
         }
 
         for thread in find_loaded_subagent_threads_for_primary(threads, primary_thread_id) {
+            self.ensure_thread_channel(thread.thread_id);
             self.upsert_hydrated_agent_picker_thread(
                 thread.thread_id,
                 thread.agent_nickname,
@@ -3536,19 +3567,99 @@ impl App {
             .agent_navigation
             .adjacent_thread_id(current_thread, direction)
         {
+            if self.agent_navigation_wraps(current_thread, direction)
+                && let Some(primary_thread_id) = self.primary_thread_id
+                && self
+                    .attempt_subagent_backfill_for_primary(app_server, primary_thread_id)
+                    .await
+            {
+                return self
+                    .agent_navigation
+                    .adjacent_thread_id(self.current_displayed_thread_id(), direction);
+            }
             return Some(thread_id);
         }
 
         let primary_thread_id = self.primary_thread_id?;
-        if self.last_subagent_backfill_attempt == Some(primary_thread_id) {
+        if !self
+            .attempt_subagent_backfill_for_primary(app_server, primary_thread_id)
+            .await
+        {
             return None;
-        }
-
-        if self.backfill_loaded_subagent_threads(app_server).await {
-            self.last_subagent_backfill_attempt = Some(primary_thread_id);
         }
         self.agent_navigation
             .adjacent_thread_id(self.current_displayed_thread_id(), direction)
+    }
+
+    async fn attempt_subagent_backfill_for_primary(
+        &mut self,
+        app_server: &mut AppServerSession,
+        primary_thread_id: ThreadId,
+    ) -> bool {
+        let now = Instant::now();
+        if !self.should_attempt_subagent_backfill(primary_thread_id, now) {
+            return false;
+        }
+
+        let backfill_succeeded = self.backfill_loaded_subagent_threads(app_server).await;
+        self.record_subagent_backfill_attempt(primary_thread_id, now, backfill_succeeded);
+        true
+    }
+
+    fn agent_navigation_wraps(
+        &self,
+        current_displayed_thread_id: Option<ThreadId>,
+        direction: AgentNavigationDirection,
+    ) -> bool {
+        let Some(current_thread_id) = current_displayed_thread_id else {
+            return false;
+        };
+        let ordered_threads = self.agent_navigation.ordered_threads();
+        if ordered_threads.len() < 2 {
+            return false;
+        }
+        let Some(current_idx) = ordered_threads
+            .iter()
+            .position(|(thread_id, _)| *thread_id == current_thread_id)
+        else {
+            return false;
+        };
+
+        match direction {
+            AgentNavigationDirection::Next => current_idx + 1 == ordered_threads.len(),
+            AgentNavigationDirection::Previous => current_idx == 0,
+        }
+    }
+
+    fn should_attempt_subagent_backfill(&self, primary_thread_id: ThreadId, now: Instant) -> bool {
+        let Some(last_attempt) = self.last_subagent_backfill_attempt else {
+            return true;
+        };
+
+        if last_attempt.primary_thread_id != primary_thread_id {
+            return true;
+        }
+
+        let cooldown = if last_attempt.success {
+            SUBAGENT_BACKFILL_RETRY_COOLDOWN
+        } else {
+            SUBAGENT_BACKFILL_FAILURE_RETRY_COOLDOWN
+        };
+
+        now.saturating_duration_since(last_attempt.attempted_at) >= cooldown
+    }
+
+    fn record_subagent_backfill_attempt(
+        &mut self,
+        primary_thread_id: ThreadId,
+        now: Instant,
+        success: bool,
+    ) {
+        self.last_subagent_backfill_attempt = Some(SubagentBackfillAttempt {
+            primary_thread_id,
+            attempted_at: now,
+            success,
+        });
     }
 
     fn fresh_session_config(&self) -> Config {
@@ -3908,8 +4019,12 @@ impl App {
             pending_app_server_requests: PendingAppServerRequests::default(),
         };
         if let Some(started) = initial_started_thread {
-            app.enqueue_primary_thread_session(started.session, started.turns)
-                .await?;
+            app.attach_primary_thread_session_with_backfill(
+                &mut app_server,
+                started.session,
+                started.turns,
+            )
+            .await?;
         }
 
         // On startup, if Agent mode (workspace-write) or ReadOnly is active, warn about world-writable dirs on Windows.
@@ -6226,7 +6341,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backfill_hydrates_metadata_without_creating_thread_channels() {
+    async fn backfill_hydrates_metadata_and_registers_thread_channel() {
         let mut app = make_test_app().await;
         let primary_thread_id = ThreadId::new();
         let child_thread_id = ThreadId::new();
@@ -6264,8 +6379,8 @@ mod tests {
             "metadata should be visible after backfill"
         );
         assert!(
-            !app.thread_event_channels.contains_key(&child_thread_id),
-            "backfill should not create empty thread channels"
+            app.thread_event_channels.contains_key(&child_thread_id),
+            "backfill should register a thread channel so the picker can show the thread"
         );
     }
 
@@ -6471,10 +6586,17 @@ mod tests {
             Some("explorer".to_string()),
             /*is_closed*/ false,
         );
-        app.thread_event_channels.insert(
-            child_thread_id,
-            ThreadEventChannel::new(THREAD_EVENT_CHANNEL_CAPACITY),
-        );
+        let placeholder_channel = ThreadEventChannel::new(THREAD_EVENT_CHANNEL_CAPACITY);
+        let placeholder_store = Arc::clone(&placeholder_channel.store);
+        {
+            let mut store = placeholder_store.lock().await;
+            store.push_notification(turn_started_notification(
+                child_thread_id,
+                "turn-before-attach",
+            ));
+        }
+        app.thread_event_channels
+            .insert(child_thread_id, placeholder_channel);
 
         assert!(
             app.ensure_selectable_thread_channel(&mut app_server, child_thread_id)
@@ -6482,12 +6604,15 @@ mod tests {
         );
 
         let snapshot = {
-            let store = &app
+            let channel = app
                 .thread_event_channels
                 .get(&child_thread_id)
-                .expect("child thread channel should be attached")
-                .store;
-            store.lock().await.snapshot()
+                .expect("child thread channel should be attached");
+            assert!(
+                Arc::ptr_eq(&placeholder_store, &channel.store),
+                "attach should reuse existing thread event store"
+            );
+            channel.store.lock().await.snapshot()
         };
         let session = snapshot
             .session
@@ -6497,7 +6622,60 @@ mod tests {
         assert_eq!(session.cwd, PathBuf::from("/tmp/agent"));
         assert_eq!(session.rollout_path, Some(rollout_path));
         assert_eq!(snapshot.turns, Vec::<Turn>::new());
+        assert_eq!(snapshot.events.len(), 1);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn subagent_backfill_attempt_retries_after_cooldown() {
+        let mut app = make_test_app().await;
+        let primary_thread_id = ThreadId::new();
+        let now = Instant::now();
+
+        assert!(app.should_attempt_subagent_backfill(primary_thread_id, now));
+
+        app.record_subagent_backfill_attempt(primary_thread_id, now, true);
+        assert!(!app.should_attempt_subagent_backfill(primary_thread_id, now));
+        assert!(!app.should_attempt_subagent_backfill(
+            primary_thread_id,
+            now + SUBAGENT_BACKFILL_RETRY_COOLDOWN - Duration::from_millis(1),
+        ));
+        assert!(app.should_attempt_subagent_backfill(
+            primary_thread_id,
+            now + SUBAGENT_BACKFILL_RETRY_COOLDOWN,
+        ));
+    }
+
+    #[tokio::test]
+    async fn subagent_backfill_failure_retry_uses_shorter_cooldown() {
+        let mut app = make_test_app().await;
+        let primary_thread_id = ThreadId::new();
+        let now = Instant::now();
+
+        app.record_subagent_backfill_attempt(primary_thread_id, now, false);
+        assert!(!app.should_attempt_subagent_backfill(primary_thread_id, now));
+        assert!(!app.should_attempt_subagent_backfill(
+            primary_thread_id,
+            now + SUBAGENT_BACKFILL_FAILURE_RETRY_COOLDOWN - Duration::from_millis(1),
+        ));
+        assert!(app.should_attempt_subagent_backfill(
+            primary_thread_id,
+            now + SUBAGENT_BACKFILL_FAILURE_RETRY_COOLDOWN,
+        ));
+    }
+
+    #[tokio::test]
+    async fn subagent_backfill_attempt_state_is_scoped_to_primary_thread() {
+        let mut app = make_test_app().await;
+        let first_primary = ThreadId::new();
+        let second_primary = ThreadId::new();
+        let now = Instant::now();
+
+        app.record_subagent_backfill_attempt(first_primary, now, true);
+        assert!(
+            app.should_attempt_subagent_backfill(second_primary, now),
+            "changing primary threads should permit immediate backfill"
+        );
     }
 
     #[test]
@@ -6677,11 +6855,13 @@ mod tests {
         let approval_request = exec_approval_request(thread_id, "turn-1", "call-1", None);
 
         app.enqueue_primary_thread_request(approval_request).await?;
-        app.enqueue_primary_thread_session(
-            test_thread_session(thread_id, PathBuf::from("/tmp/project")),
-            Vec::new(),
-        )
-        .await?;
+        let turns = app
+            .begin_primary_thread_session(
+                test_thread_session(thread_id, PathBuf::from("/tmp/project")),
+                Vec::new(),
+            )
+            .await?;
+        app.finalize_primary_thread_session_replay(turns).await?;
 
         let rx = app
             .active_thread_rx
@@ -6799,21 +6979,23 @@ mod tests {
             session_telemetry: app.session_telemetry.clone(),
         });
 
-        app.enqueue_primary_thread_session(
-            test_thread_session(thread_id, PathBuf::from("/tmp/project")),
-            vec![test_turn(
-                "turn-1",
-                TurnStatus::Completed,
-                vec![ThreadItem::UserMessage {
-                    id: "user-1".to_string(),
-                    content: vec![AppServerUserInput::Text {
-                        text: "earlier prompt".to_string(),
-                        text_elements: Vec::new(),
+        let turns = app
+            .begin_primary_thread_session(
+                test_thread_session(thread_id, PathBuf::from("/tmp/project")),
+                vec![test_turn(
+                    "turn-1",
+                    TurnStatus::Completed,
+                    vec![ThreadItem::UserMessage {
+                        id: "user-1".to_string(),
+                        content: vec![AppServerUserInput::Text {
+                            text: "earlier prompt".to_string(),
+                            text_elements: Vec::new(),
+                        }],
                     }],
-                }],
-            )],
-        )
-        .await?;
+                )],
+            )
+            .await?;
+        app.finalize_primary_thread_session_replay(turns).await?;
 
         let mut saw_replayed_answer = false;
         let mut submitted_items = None;
@@ -6870,8 +7052,10 @@ mod tests {
             ..test_thread_session(thread_id, PathBuf::from("/tmp/project"))
         };
 
-        app.enqueue_primary_thread_session(incoming_session, Vec::new())
+        let turns = app
+            .begin_primary_thread_session(incoming_session, Vec::new())
             .await?;
+        app.finalize_primary_thread_session_replay(turns).await?;
 
         let channel = app
             .thread_event_channels
@@ -11261,6 +11445,67 @@ guardian_approval = true
             saw_named_wait,
             "expected replayed wait item to keep agent name"
         );
+    }
+
+    #[tokio::test]
+    async fn primary_session_backfills_collab_metadata_before_replay() -> Result<()> {
+        let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let primary_thread_id = ThreadId::new();
+        let child_thread_id = ThreadId::new();
+        let session = test_thread_session(primary_thread_id, PathBuf::from("/tmp/project"));
+        let turns = vec![test_turn(
+            "turn-1",
+            TurnStatus::Completed,
+            vec![ThreadItem::CollabAgentToolCall {
+                id: "wait-1".to_string(),
+                tool: codex_app_server_protocol::CollabAgentTool::Wait,
+                status: codex_app_server_protocol::CollabAgentToolCallStatus::InProgress,
+                sender_thread_id: primary_thread_id.to_string(),
+                receiver_thread_ids: vec![child_thread_id.to_string()],
+                prompt: None,
+                model: None,
+                reasoning_effort: None,
+                timed_out: false,
+                agents_states: HashMap::from([(
+                    child_thread_id.to_string(),
+                    codex_app_server_protocol::CollabAgentState {
+                        status: codex_app_server_protocol::CollabAgentStatus::PendingInit,
+                        message: None,
+                    },
+                )]),
+            }],
+        )];
+
+        let primary_thread = make_test_thread(primary_thread_id, ApiSessionSource::Cli);
+        let mut child_thread = make_test_thread(
+            child_thread_id,
+            ApiSessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: primary_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: Some("Scout".to_string()),
+                agent_role: Some("explorer".to_string()),
+            }),
+        );
+        child_thread.agent_nickname = Some("Scout".to_string());
+        child_thread.agent_role = Some("explorer".to_string());
+        let mut provider = FakeThreadBackfillProvider::new(vec![primary_thread, child_thread]);
+        app.attach_primary_thread_session_with_backfill(&mut provider, session, turns)
+            .await?;
+
+        let mut saw_named_wait = false;
+        while let Ok(event) = app_event_rx.try_recv() {
+            if let AppEvent::InsertHistoryCell(cell) = event {
+                let transcript = lines_to_single_string(&cell.transcript_lines(80));
+                saw_named_wait |= transcript.contains("Waiting for Scout");
+            }
+        }
+
+        assert!(
+            saw_named_wait,
+            "expected replayed wait item to keep agent name after backfill"
+        );
+        Ok(())
     }
 
     #[tokio::test]

@@ -1444,6 +1444,66 @@ mod phase2 {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn writing_attestation_does_not_mark_requirement_when_file_write_fails() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let codex_home = temp_dir.path().join("codex-home");
+        let root = memory_root(&codex_home);
+        let config = config_for_memory_root(&root);
+        let selection =
+            selection_for_attested_outputs(vec![stage1_output_with_source_updated_at(200)]);
+        let state_db =
+            codex_state::StateRuntime::init(codex_home.clone(), config.model_provider_id.clone())
+                .await
+                .expect("initialize state db");
+        let external_dir = temp_dir.path().join("external");
+        let external_attestation = external_dir.join("attestation.json");
+
+        tokio::fs::create_dir_all(&root)
+            .await
+            .expect("create memory root");
+        tokio::fs::create_dir_all(&external_dir)
+            .await
+            .expect("create external dir");
+        tokio::fs::write(root.join("MEMORY.md"), "memory index\n")
+            .await
+            .expect("write memory index");
+        tokio::fs::write(root.join("memory_summary.md"), "memory summary\n")
+            .await
+            .expect("write memory summary");
+        tokio::fs::write(&external_attestation, "placeholder\n")
+            .await
+            .expect("write external attestation placeholder");
+
+        let attestation_path =
+            phase2::test_consolidation_artifact_attestation_path(&root).expect("attestation path");
+        std::os::unix::fs::symlink(&external_attestation, &attestation_path)
+            .expect("symlink attestation");
+
+        let err = phase2::test_write_consolidation_artifact_attestation_with_state_db(
+            Arc::clone(&config),
+            &root,
+            &selection,
+            &state_db,
+        )
+        .await
+        .expect_err("symlinked attestation path should be rejected");
+
+        assert!(
+            err.to_string().contains("symlink"),
+            "expected a symlink safety error, got: {err}"
+        );
+        let memory_root_key = phase2::test_memory_root_attestation_key(&root);
+        assert!(
+            !state_db
+                .global_phase2_attestation_required_for_root(memory_root_key.as_str())
+                .await
+                .expect("load attestation requirement after write failure"),
+            "failed attestation writes must not mark the root as attestation-required"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn writing_attestation_rejects_hard_linked_attestation_path_without_truncating_target() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let codex_home = temp_dir.path().join("codex-home");

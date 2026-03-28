@@ -61,8 +61,10 @@ use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::SkillsListResponse;
+use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadLoadedListParams;
+use codex_app_server_protocol::ThreadLoadedListResponse;
 use codex_app_server_protocol::ThreadRollbackResponse;
 use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnStatus;
@@ -118,8 +120,10 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::future::Future;
 use std::path::Path;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -151,6 +155,40 @@ use self::pending_interactive_replay::PendingInteractiveReplayState;
 
 const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";
 const THREAD_EVENT_CHANNEL_CAPACITY: usize = 32768;
+
+type ThreadLoadedListFetchFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<ThreadLoadedListResponse>> + Send + 'a>>;
+type ThreadReadFetchFuture<'a> = Pin<Box<dyn Future<Output = Result<Thread>> + Send + 'a>>;
+
+trait ThreadBackfillProvider {
+    fn fetch_thread_loaded_list<'a>(
+        &'a mut self,
+        params: ThreadLoadedListParams,
+    ) -> ThreadLoadedListFetchFuture<'a>;
+
+    fn fetch_thread<'a>(
+        &'a mut self,
+        thread_id: ThreadId,
+        include_turns: bool,
+    ) -> ThreadReadFetchFuture<'a>;
+}
+
+impl ThreadBackfillProvider for AppServerSession {
+    fn fetch_thread_loaded_list<'a>(
+        &'a mut self,
+        params: ThreadLoadedListParams,
+    ) -> ThreadLoadedListFetchFuture<'a> {
+        Box::pin(async move { AppServerSession::thread_loaded_list(self, params).await })
+    }
+
+    fn fetch_thread<'a>(
+        &'a mut self,
+        thread_id: ThreadId,
+        include_turns: bool,
+    ) -> ThreadReadFetchFuture<'a> {
+        Box::pin(async move { AppServerSession::thread_read(self, thread_id, include_turns).await })
+    }
+}
 
 enum ThreadInteractiveRequest {
     Approval(ApprovalRequest),
@@ -3054,6 +3092,105 @@ impl App {
         self.sync_active_agent_label();
     }
 
+    async fn ensure_selectable_thread_channel(
+        &mut self,
+        app_server: &mut AppServerSession,
+        thread_id: ThreadId,
+    ) -> bool {
+        if self.thread_event_channels.contains_key(&thread_id) {
+            return true;
+        }
+
+        if !self.has_hydrated_agent_picker_thread_metadata(&thread_id) {
+            return false;
+        }
+
+        let mut resume_config = match self
+            .rebuild_config_for_thread_session_or_current(thread_id, None)
+            .await
+        {
+            Ok(config) => config,
+            Err(err) => {
+                tracing::debug!(
+                    thread_id = %thread_id,
+                    error = %err,
+                    "rebuilding config from thread metadata for hydrated attach"
+                );
+                let current_cwd = self.config.cwd.clone();
+                match app_server
+                    .thread_read(thread_id, /*include_turns*/ false)
+                    .await
+                {
+                    Ok(thread) => match self
+                        .rebuild_config_for_resume_or_fallback(&current_cwd, thread.cwd)
+                        .await
+                    {
+                        Ok(config) => config,
+                        Err(config_err) => {
+                            tracing::debug!(
+                                thread_id = %thread_id,
+                                error = %config_err,
+                                "falling back to current config after thread metadata rebuild failed"
+                            );
+                            self.config.clone()
+                        }
+                    },
+                    Err(read_err) => {
+                        tracing::debug!(
+                            thread_id = %thread_id,
+                            error = %read_err,
+                            "falling back to current config after thread metadata lookup failed"
+                        );
+                        self.config.clone()
+                    }
+                }
+            }
+        };
+
+        if let Some(approval_override) = self.thread_approval_overrides.get(&thread_id).cloned()
+            && let Err(err) = self
+                .apply_thread_approval_override_to_config(&mut resume_config, &approval_override)
+        {
+            tracing::warn!(
+                thread_id = %thread_id,
+                error = %err,
+                "failed to apply thread approval override before hydrated attach"
+            );
+            return false;
+        }
+
+        match app_server.resume_thread(resume_config, thread_id).await {
+            Ok(AppServerStartedThread { mut session, turns }) => {
+                if let Some(approval_override) = self.thread_approval_overrides.remove(&thread_id) {
+                    Self::apply_thread_approval_override_to_session(
+                        &mut session,
+                        &approval_override,
+                    );
+                }
+                self.thread_event_channels.insert(
+                    thread_id,
+                    ThreadEventChannel::new_with_session(
+                        THREAD_EVENT_CHANNEL_CAPACITY,
+                        session.clone(),
+                        turns,
+                    ),
+                );
+                if self.primary_thread_id == Some(thread_id) {
+                    self.primary_session_configured = Some(session);
+                }
+                true
+            }
+            Err(err) => {
+                tracing::warn!(
+                    thread_id = %thread_id,
+                    error = %err,
+                    "failed to attach hydrated thread on demand"
+                );
+                false
+            }
+        }
+    }
+
     async fn select_agent_thread(
         &mut self,
         tui: &mut tui::Tui,
@@ -3064,7 +3201,10 @@ impl App {
             return Ok(());
         }
 
-        if !self.thread_event_channels.contains_key(&thread_id) {
+        if !self
+            .ensure_selectable_thread_channel(app_server, thread_id)
+            .await
+        {
             self.chat_widget
                 .add_error_message(format!("Failed to attach to agent thread {thread_id}."));
             return Ok(());
@@ -3306,12 +3446,20 @@ impl App {
         &mut self,
         app_server: &mut AppServerSession,
     ) -> bool {
+        self.backfill_loaded_subagent_threads_with_provider(app_server)
+            .await
+    }
+
+    async fn backfill_loaded_subagent_threads_with_provider<P>(&mut self, provider: &mut P) -> bool
+    where
+        P: ThreadBackfillProvider,
+    {
         let Some(primary_thread_id) = self.primary_thread_id else {
             return false;
         };
 
-        let loaded_thread_ids = match app_server
-            .thread_loaded_list(ThreadLoadedListParams {
+        let loaded_thread_ids = match provider
+            .fetch_thread_loaded_list(ThreadLoadedListParams {
                 cursor: None,
                 limit: None,
             })
@@ -3336,8 +3484,8 @@ impl App {
                 continue;
             }
 
-            match app_server
-                .thread_read(thread_id, /*include_turns*/ false)
+            match provider
+                .fetch_thread(thread_id, /*include_turns*/ false)
                 .await
             {
                 Ok(thread) => threads.push(thread),
@@ -3349,7 +3497,6 @@ impl App {
         }
 
         for thread in find_loaded_subagent_threads_for_primary(threads, primary_thread_id) {
-            self.ensure_thread_channel(thread.thread_id);
             self.upsert_hydrated_agent_picker_thread(
                 thread.thread_id,
                 thread.agent_nickname,
@@ -5948,10 +6095,14 @@ mod tests {
     use codex_app_server_protocol::RequestId as AppServerRequestId;
     use codex_app_server_protocol::ServerNotification;
     use codex_app_server_protocol::ServerRequest;
+    use codex_app_server_protocol::SessionSource as ApiSessionSource;
     use codex_app_server_protocol::Thread;
     use codex_app_server_protocol::ThreadClosedNotification;
     use codex_app_server_protocol::ThreadItem;
+    use codex_app_server_protocol::ThreadLoadedListParams;
+    use codex_app_server_protocol::ThreadLoadedListResponse;
     use codex_app_server_protocol::ThreadStartedNotification;
+    use codex_app_server_protocol::ThreadStatus;
     use codex_app_server_protocol::ThreadTokenUsage;
     use codex_app_server_protocol::ThreadTokenUsageUpdatedNotification;
     use codex_app_server_protocol::TokenUsageBreakdown;
@@ -5983,7 +6134,10 @@ mod tests {
     use codex_protocol::protocol::RolloutLine;
     use codex_protocol::protocol::SandboxPolicy;
     use codex_protocol::protocol::SessionConfiguredEvent;
+    use codex_protocol::protocol::SessionMeta;
+    use codex_protocol::protocol::SessionMetaLine;
     use codex_protocol::protocol::SessionSource;
+    use codex_protocol::protocol::SubAgentSource;
     use codex_protocol::protocol::TurnContextItem;
     use codex_protocol::user_input::TextElement;
     use codex_protocol::user_input::UserInput;
@@ -5996,6 +6150,230 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use tempfile::tempdir;
     use tokio::time;
+
+    struct FakeThreadBackfillProvider {
+        threads: HashMap<String, Thread>,
+    }
+
+    impl FakeThreadBackfillProvider {
+        fn new(threads: Vec<Thread>) -> Self {
+            let threads = threads
+                .into_iter()
+                .map(|thread| (thread.id.clone(), thread))
+                .collect();
+            Self { threads }
+        }
+    }
+
+    impl ThreadBackfillProvider for FakeThreadBackfillProvider {
+        fn fetch_thread_loaded_list<'a>(
+            &'a mut self,
+            _params: ThreadLoadedListParams,
+        ) -> ThreadLoadedListFetchFuture<'a> {
+            let ids = self.threads.keys().cloned().collect::<Vec<_>>();
+            Box::pin(async move {
+                Ok(ThreadLoadedListResponse {
+                    data: ids,
+                    next_cursor: None,
+                })
+            })
+        }
+
+        fn fetch_thread<'a>(
+            &'a mut self,
+            thread_id: ThreadId,
+            _include_turns: bool,
+        ) -> ThreadReadFetchFuture<'a> {
+            let thread_id_string = thread_id.to_string();
+            let thread = self
+                .threads
+                .get(&thread_id_string)
+                .expect("test provider should include requested thread")
+                .clone();
+            Box::pin(async move { Ok(thread) })
+        }
+    }
+
+    fn make_test_thread(thread_id: ThreadId, source: ApiSessionSource) -> Thread {
+        Thread {
+            id: thread_id.to_string(),
+            preview: String::new(),
+            ephemeral: false,
+            model_provider: "openai".to_string(),
+            created_at: 0,
+            updated_at: 0,
+            status: ThreadStatus::Idle,
+            path: None,
+            cwd: PathBuf::from("/tmp"),
+            cli_version: "0.0.0".to_string(),
+            source,
+            agent_nickname: None,
+            agent_role: None,
+            git_info: None,
+            name: None,
+            turns: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn backfill_hydrates_metadata_without_creating_thread_channels() {
+        let mut app = make_test_app().await;
+        let primary_thread_id = ThreadId::new();
+        let child_thread_id = ThreadId::new();
+        app.primary_thread_id = Some(primary_thread_id);
+
+        let primary_thread = make_test_thread(primary_thread_id, ApiSessionSource::Cli);
+        let mut child_thread = make_test_thread(
+            child_thread_id,
+            ApiSessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: primary_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: Some("Scout".to_string()),
+                agent_role: Some("explorer".to_string()),
+            }),
+        );
+        child_thread.agent_nickname = Some("Scout".to_string());
+        child_thread.agent_role = Some("explorer".to_string());
+
+        let mut provider =
+            FakeThreadBackfillProvider::new(vec![primary_thread, child_thread.clone()]);
+        assert!(
+            app.backfill_loaded_subagent_threads_with_provider(&mut provider)
+                .await
+        );
+
+        let entry = app
+            .agent_navigation
+            .get(&child_thread_id)
+            .expect("child thread should be registered");
+        assert_eq!(entry.agent_nickname.as_deref(), Some("Scout"));
+        assert_eq!(entry.agent_role.as_deref(), Some("explorer"));
+        assert!(
+            app.has_hydrated_agent_picker_thread_metadata(&child_thread_id),
+            "metadata should be visible after backfill"
+        );
+        assert!(
+            !app.thread_event_channels.contains_key(&child_thread_id),
+            "backfill should not create empty thread channels"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_selectable_thread_channel_resumes_hydrated_backfilled_thread() -> Result<()> {
+        let mut app = make_test_app().await;
+        let temp_dir = tempdir()?;
+        app.config.codex_home = temp_dir.path().to_path_buf();
+        let child_thread_id = ThreadId::new();
+        let rollout_path = temp_dir
+            .path()
+            .join("sessions")
+            .join("2025")
+            .join("01")
+            .join("05")
+            .join(format!(
+                "rollout-2025-01-05T12-00-00-{child_thread_id}.jsonl"
+            ));
+        std::fs::create_dir_all(
+            rollout_path
+                .parent()
+                .expect("rollout path should have a parent directory"),
+        )?;
+        let meta = SessionMeta {
+            id: child_thread_id,
+            forked_from_id: None,
+            timestamp: "2025-01-05T12:00:00Z".to_string(),
+            cwd: PathBuf::from("/tmp/agent"),
+            originator: "codex".to_string(),
+            cli_version: "0.0.0".to_string(),
+            source: SessionSource::Cli,
+            agent_path: None,
+            agent_nickname: Some("Scout".to_string()),
+            agent_role: Some("explorer".to_string()),
+            model_provider: Some("openai".to_string()),
+            base_instructions: None,
+            dynamic_tools: None,
+            memory_mode: None,
+        };
+        let meta_payload = serde_json::to_value(SessionMetaLine { meta, git: None })?;
+        let turn_context = TurnContextItem {
+            turn_id: None,
+            trace_id: None,
+            cwd: PathBuf::from("/tmp/agent"),
+            current_date: None,
+            timezone: None,
+            approval_policy: app.config.permissions.approval_policy.value(),
+            sandbox_policy: app.config.permissions.sandbox_policy.get().clone(),
+            network: None,
+            model: app
+                .config
+                .model
+                .clone()
+                .unwrap_or_else(|| "gpt-5.1-codex".to_string()),
+            personality: None,
+            collaboration_mode: None,
+            realtime_active: Some(false),
+            effort: app.config.model_reasoning_effort,
+            summary: app.config.model_reasoning_summary.unwrap_or_default(),
+            user_instructions: None,
+            developer_instructions: None,
+            final_output_json_schema: None,
+            truncation_policy: None,
+        };
+        let rollout_lines = [
+            serde_json::json!({
+                "timestamp": "2025-01-05T12:00:00Z",
+                "type": "session_meta",
+                "payload": meta_payload,
+            })
+            .to_string(),
+            serde_json::to_string(&RolloutLine {
+                timestamp: "2025-01-05T12:00:00Z".to_string(),
+                item: RolloutItem::TurnContext(turn_context),
+            })?,
+        ];
+        std::fs::write(&rollout_path, rollout_lines.join("\n") + "\n")?;
+
+        let mut app_server = crate::start_embedded_app_server_for_picker(&app.config)
+            .await
+            .expect("embedded app server");
+
+        app.upsert_hydrated_agent_picker_thread(
+            child_thread_id,
+            Some("Scout".to_string()),
+            Some("explorer".to_string()),
+            /*is_closed*/ false,
+        );
+        assert!(!app.thread_event_channels.contains_key(&child_thread_id));
+
+        assert!(
+            app.ensure_selectable_thread_channel(&mut app_server, child_thread_id)
+                .await
+        );
+
+        let snapshot = {
+            let store = &app
+                .thread_event_channels
+                .get(&child_thread_id)
+                .expect("child thread channel should be attached")
+                .store;
+            store.lock().await.snapshot()
+        };
+        let session = snapshot
+            .session
+            .expect("attached thread should have a session");
+        assert_eq!(session.thread_id, child_thread_id);
+        assert_eq!(session.thread_name, None);
+        assert_eq!(session.model_provider_id, "openai");
+        assert_eq!(session.cwd, PathBuf::from("/tmp/agent"));
+        assert_eq!(session.rollout_path, Some(rollout_path));
+        assert_eq!(snapshot.turns, Vec::<Turn>::new());
+        assert!(
+            app.has_hydrated_agent_picker_thread_metadata(&child_thread_id),
+            "hydrated metadata should survive attach"
+        );
+        Ok(())
+    }
 
     #[test]
     fn normalize_harness_overrides_resolves_relative_add_dirs() -> Result<()> {
@@ -10736,6 +11114,7 @@ guardian_approval = true
                             prompt: None,
                             model: None,
                             reasoning_effort: None,
+                            timed_out: false,
                             agents_states: HashMap::new(),
                         },
                     }),
@@ -10764,8 +11143,7 @@ guardian_approval = true
         let mut app = make_test_app().await;
         let thread_id = ThreadId::new();
         let initial_session = test_thread_session(thread_id, PathBuf::from("/tmp/original"));
-        let mut channel =
-            ThreadEventChannel::new_with_session(4, initial_session.clone(), Vec::new());
+        let channel = ThreadEventChannel::new_with_session(4, initial_session.clone(), Vec::new());
         app.chat_widget
             .handle_thread_session(initial_session.clone());
         app.chat_widget

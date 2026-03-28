@@ -315,8 +315,8 @@ pub(in crate::memories) mod agent {
         }
         let mut agent_config = config.as_ref().clone();
 
-        match AbsolutePathBuf::from_absolute_path(root.clone()) {
-            Ok(root) => agent_config.cwd = root.into(),
+        let absolute_root = match AbsolutePathBuf::from_absolute_path(root.clone()) {
+            Ok(root) => root,
             Err(err) => {
                 warn!(
                     "memory phase-2 consolidation could not set cwd from memory root {}: {err}",
@@ -324,7 +324,8 @@ pub(in crate::memories) mod agent {
                 );
                 return None;
             }
-        }
+        };
+        agent_config.cwd = absolute_root.into();
         // Consolidation threads must never feed back into phase-1 memory generation.
         agent_config.memories.generate_memories = false;
         // Approval policy

@@ -1192,12 +1192,10 @@ pub(in crate::memories) mod agent {
         }
         #[cfg(all(not(unix), not(windows)))]
         {
-            let file = std::fs::OpenOptions::new().read(true).open(path)?;
-            let metadata = file.metadata()?;
-            if !metadata.is_file() {
-                return Err(std::io::Error::other("path is not a regular file"));
-            }
-            Ok(file)
+            let _ = path;
+            compile_error!(
+                "secure file reading is not implemented for this platform; this is required for memory consolidation attestation"
+            );
         }
     }
 
@@ -1249,16 +1247,10 @@ pub(in crate::memories) mod agent {
         }
         #[cfg(all(not(unix), not(windows)))]
         {
-            let file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .open(path)?;
-            let metadata = file.metadata()?;
-            if !metadata.is_file() {
-                return Err(std::io::Error::other("path is not a regular file"));
-            }
-            file.set_len(0)?;
-            Ok(file)
+            let _ = path;
+            compile_error!(
+                "secure file writing is not implemented for this platform; this is required for memory consolidation attestation"
+            );
         }
     }
 

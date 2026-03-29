@@ -2997,7 +2997,7 @@ impl App {
                         /*is_closed*/ false,
                     );
                 }
-            } else {
+            } else if !self.has_hydrated_agent_picker_thread_metadata(&thread_id) {
                 self.mark_agent_picker_thread_closed(thread_id);
             }
         }
@@ -8139,6 +8139,33 @@ mod tests {
                 agent_nickname: Some("Robie".to_string()),
                 agent_role: Some("explorer".to_string()),
                 is_closed: true,
+            })
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn open_agent_picker_keeps_hydrated_backfilled_thread_open() -> Result<()> {
+        let mut app = make_test_app().await;
+        let thread_id = ThreadId::new();
+        app.thread_event_channels
+            .insert(thread_id, ThreadEventChannel::new(1));
+        app.upsert_hydrated_agent_picker_thread(
+            thread_id,
+            Some("Scout".to_string()),
+            Some("explorer".to_string()),
+            /*is_closed*/ false,
+        );
+
+        app.open_agent_picker().await;
+
+        assert_eq!(app.thread_event_channels.contains_key(&thread_id), true);
+        assert_eq!(
+            app.agent_navigation.get(&thread_id),
+            Some(&AgentPickerThreadEntry {
+                agent_nickname: Some("Scout".to_string()),
+                agent_role: Some("explorer".to_string()),
+                is_closed: false,
             })
         );
         Ok(())

@@ -192,11 +192,11 @@ fn effective_role_profile_after_precedence(
         })?;
     let preserve_current_profile = role_preserves_current_profile(role_config);
 
-    Ok(merged_config.profile.or_else(|| {
-        preserve_current_profile
-            .then(|| config.active_profile.clone())
-            .flatten()
-    }))
+    if preserve_current_profile {
+        Ok(config.active_profile.clone().or(merged_config.profile))
+    } else {
+        Ok(merged_config.profile)
+    }
 }
 
 /// Applies a named role layer to `config` while preserving caller-owned model selection.

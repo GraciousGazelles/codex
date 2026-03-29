@@ -800,6 +800,68 @@ model_reasoning_effort = "high"
 }
 
 #[tokio::test]
+async fn role_model_override_locks_use_preserved_active_profile_before_merged_profile() {
+    let home = TempDir::new().expect("create temp dir");
+    tokio::fs::write(
+        home.path().join(CONFIG_TOML_FILE),
+        r#"
+profile = "base-profile"
+
+[profiles.base-profile]
+model = "base-model"
+model_reasoning_effort = "low"
+
+[profiles.harness-profile]
+model = "harness-model"
+model_reasoning_effort = "medium"
+"#,
+    )
+    .await
+    .expect("write config.toml");
+    let mut config = ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .harness_overrides(ConfigOverrides {
+            config_profile: Some("harness-profile".to_string()),
+            ..Default::default()
+        })
+        .fallback_cwd(Some(home.path().to_path_buf()))
+        .build()
+        .await
+        .expect("load config");
+    let role_path = write_role_config(
+        &home,
+        "preserve-current-profile-locks.toml",
+        r#"developer_instructions = "Stay focused"
+
+[profiles.harness-profile]
+model = "role-model"
+model_reasoning_effort = "high"
+"#,
+    )
+    .await;
+    config.agent_roles.insert(
+        "custom".to_string(),
+        AgentRoleConfig {
+            description: None,
+            config_file: Some(role_path),
+            nickname_candidates: None,
+        },
+    );
+
+    let locks = role_model_override_locks(&config, Some("custom"))
+        .await
+        .expect("custom role should resolve");
+
+    assert_eq!(
+        locks,
+        RoleModelOverrideLocks {
+            model: true,
+            model_reasoning_effort: true,
+        }
+    );
+}
+
+#[tokio::test]
 async fn apply_role_preserves_current_model_settings_when_role_does_not_own_them() {
     let home = TempDir::new().expect("create temp dir");
     tokio::fs::write(

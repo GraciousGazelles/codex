@@ -518,7 +518,7 @@ fn test_build_specs_collab_tools_enabled() {
         windows_sandbox_level: WindowsSandboxLevel::Disabled,
     });
     let (tools, _) = build_specs(&tools_config, None, None, &[]).build();
-    assert_contains_tool_names(&[
+    assert_contains_tool_names(&tools, &[
         "spawn_agent",
         "list_agents",
         "send_input",

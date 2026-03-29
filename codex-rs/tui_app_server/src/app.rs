@@ -3538,11 +3538,15 @@ impl App {
 
         for thread in find_loaded_subagent_threads_for_primary(threads, primary_thread_id) {
             self.ensure_thread_channel(thread.thread_id);
+            let is_closed = self
+                .agent_navigation
+                .get(&thread.thread_id)
+                .is_some_and(|entry| entry.is_closed);
             self.upsert_hydrated_agent_picker_thread(
                 thread.thread_id,
                 thread.agent_nickname,
                 thread.agent_role,
-                /*is_closed*/ false,
+                is_closed,
             );
         }
 
@@ -6382,6 +6386,51 @@ mod tests {
             app.thread_event_channels.contains_key(&child_thread_id),
             "backfill should register a thread channel so the picker can show the thread"
         );
+    }
+
+    #[tokio::test]
+    async fn backfill_preserves_closed_state_for_hydrated_threads() -> Result<()> {
+        let mut app = make_test_app().await;
+        let primary_thread_id = ThreadId::new();
+        let child_thread_id = ThreadId::new();
+        app.primary_thread_id = Some(primary_thread_id);
+
+        let primary_thread = make_test_thread(primary_thread_id, ApiSessionSource::Cli);
+        let child_thread = make_test_thread(
+            child_thread_id,
+            ApiSessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: primary_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: Some("Scout".to_string()),
+                agent_role: Some("explorer".to_string()),
+            }),
+        );
+
+        app.upsert_agent_picker_thread(
+            child_thread_id,
+            Some("Scout".to_string()),
+            Some("explorer".to_string()),
+            /*is_closed*/ true,
+        );
+
+        let mut provider =
+            FakeThreadBackfillProvider::new(vec![primary_thread, child_thread.clone()]);
+        assert!(
+            app.backfill_loaded_subagent_threads_with_provider(&mut provider)
+                .await
+        );
+
+        let entry = app
+            .agent_navigation
+            .get(&child_thread_id)
+            .expect("backfilled child thread should remain registered");
+        assert!(entry.is_closed, "backfill should not reopen closed threads");
+        assert!(
+            app.has_hydrated_agent_picker_thread_metadata(&child_thread_id),
+            "metadata should be hydrated during backfill"
+        );
+        Ok(())
     }
 
     #[tokio::test]
